@@ -387,7 +387,7 @@ class Panel(QWidget):
         def existing():d.accept();self.add_repo(QFileDialog.getExistingDirectory(self,'选择已有游戏项目'))
         self.button(row,'下载团队项目',download);self.button(row,'添加已有项目',existing);self.button(row,'明白了',d.accept);d.exec()
     def help(self):
-        self.show_text('LXGit 游戏协作 0.0.2\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n运行需要 Git for Windows；完整功能与验证范围见工具目录 README.md / TODO.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
+        self.show_text('LXGit 游戏协作 0.0.3\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n运行需要 Git for Windows；完整功能与验证范围见工具目录 README.md / TODO.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
     def shutdown(self):
         if self.closed:return
         self.closed=True;self.timer.stop()
