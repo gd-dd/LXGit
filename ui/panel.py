@@ -9,23 +9,27 @@ from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButto
     QMessageBox,QMenu,QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView)
 
 STYLE='''
-QWidget#LXGit { background:#10191c; color:#e3ece5; font-family:"Microsoft YaHei UI"; font-size:13px; }
-QWidget#LXGit QWidget {background:#10191c; color:#e3ece5;}
-QWidget#LXGit QLabel {color:#d9e8de;}
-QWidget#LXGit QPushButton {background:#23342c; color:#e6efe7; border:1px solid #3a5141; border-radius:6px; padding:7px 12px;}
-QWidget#LXGit QPushButton:hover {background:#38523b; border-color:#b1d57c;}
-QWidget#LXGit QPushButton:disabled {color:#6c7c72; background:#1d2924;}
-QWidget#LXGit QPushButton#primary {background:#b3d783; color:#142514; font-weight:bold;}
-QWidget#LXGit QLineEdit, QWidget#LXGit QPlainTextEdit, QWidget#LXGit QTextEdit, QWidget#LXGit QListWidget, QWidget#LXGit QComboBox {background:#15231f; color:#e3ece5; border:1px solid #30473b; border-radius:5px; padding:6px; selection-background-color:#3c6242;}
-QWidget#LXGit QTabWidget::pane {border:1px solid #30473b;}
-QWidget#LXGit QTabBar::tab {background:#1c2c25; color:#bfcec2; padding:10px 20px;}
-QWidget#LXGit QTabBar::tab:selected {color:#c9ed9b; background:#304735;}
-QWidget#LXGit QSplitter::handle {background:#30473b; width:2px;}
+QWidget#LXGit { background:#f7faf3; color:#243227; font-family:"Microsoft YaHei UI"; font-size:13px; }
+QWidget#LXGit QWidget {background:#f7faf3; color:#243227;}
+QWidget#LXGit QLabel {color:#344a35;}
+QWidget#LXGit QPushButton {background:#ffffff; color:#2d432d; border:1px solid #c6d9b1; border-radius:6px; padding:7px 12px;}
+QWidget#LXGit QPushButton:hover {background:#eaf4dc; border-color:#8dbb43;}
+QWidget#LXGit QPushButton:disabled {color:#83907c; background:#edf1e8;}
+QWidget#LXGit QPushButton#primary {background:#91bd45; color:#172810; font-weight:bold;}
+QWidget#LXGit QLineEdit, QWidget#LXGit QPlainTextEdit, QWidget#LXGit QTextEdit, QWidget#LXGit QListWidget, QWidget#LXGit QComboBox {background:#ffffff; color:#243227; border:1px solid #d5e1ca; border-radius:5px; padding:6px; selection-background-color:#d8ebbb; selection-color:#243227;}
+QWidget#LXGit QTabWidget::pane {border:1px solid #d5e1ca;}
+QWidget#LXGit QTabBar::tab {background:#edf3e6; color:#53644a; padding:10px 20px;}
+QWidget#LXGit QTabBar::tab:selected {color:#365c19; background:#deedc8;}
+QWidget#LXGit QSplitter::handle {background:#d5e1ca; width:2px;}
+QWidget#LXGit QMenu {background:#ffffff; color:#243227; border:1px solid #c6d9b1;}
+QWidget#LXGit QMenu::item:selected {background:#deedc8; color:#243227;}
+QWidget#LXGit QAbstractItemView::item:selected {background:#deedc8; color:#243227;}
+QWidget#LXGit QLineEdit:focus, QWidget#LXGit QPlainTextEdit:focus {border-color:#8dbb43;}
 '''
 STATUS={'??':'新文件',' M':'已修改','M ':'已暂存','MM':'暂存后又修改','A ':'新增已暂存',' D':'已删除','D ':'删除已暂存','R ':'已重命名','UU':'内容冲突','AA':'双方新增','DU':'一方删除','UD':'一方删除'}
 class DiffColors(QSyntaxHighlighter):
     def highlightBlock(self,text):
-        color='#9bcf8e' if text.startswith('+') else '#ef9395' if text.startswith('-') else '#91bce5' if text.startswith('@@') else None
+        color='#28733a' if text.startswith('+') else '#b83239' if text.startswith('-') else '#2866a6' if text.startswith('@@') else None
         if color:
             fmt=QTextCharFormat();fmt.setForeground(QColor(color));self.setFormat(0,len(text),fmt)
 
@@ -35,7 +39,7 @@ class Panel(QWidget):
         self.setObjectName('LXGit');self.setAttribute(Qt.WA_StyledBackground,True);self.setStyleSheet(STYLE)
         root=QVBoxLayout(self);root.setContentsMargins(18,14,18,14);root.setSpacing(12)
         header=QHBoxLayout();icon=QLabel();icon.setPixmap(QPixmap(str(context.resource('.lxtool/icon.png'))).scaled(54,54,Qt.KeepAspectRatio,Qt.SmoothTransformation));header.addWidget(icon)
-        title=QLabel('LXGit · 游戏团队协作\n和队友一起，把游戏做好');title.setStyleSheet('font-size:18px;font-weight:600;color:#c6e5a5');header.addWidget(title);header.addStretch()
+        title=QLabel('LXGit · 游戏团队协作\n和队友一起，把游戏做好');title.setStyleSheet('font-size:18px;font-weight:600;color:#416b24');header.addWidget(title);header.addStretch()
         self.button(header,'新手指南',self.beginner_guide);self.button(header,'GitHub',self.github_menu);self.button(header,'设置',self.settings_menu);root.addLayout(header)
         bar=QHBoxLayout();self.repositories=QComboBox();self.repositories.setMinimumWidth(200);self.repositories.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         for p in self.settings.get('repositories',[]):self.repositories.addItem(Path(p).name,p)
@@ -203,7 +207,7 @@ class Panel(QWidget):
             if line.startswith('@@'):in_hunk=True
             item=QListWidgetItem(line.rstrip('\r\n'));rows.addItem(item)
             if in_hunk and line.startswith(('+','-')):
-                item.setFlags(item.flags()|Qt.ItemIsUserCheckable);item.setCheckState(Qt.Checked);choices[index]=item;item.setForeground(QColor('#9bcf8e' if line.startswith('+') else '#ef9395'))
+                item.setFlags(item.flags()|Qt.ItemIsUserCheckable);item.setCheckState(Qt.Checked);choices[index]=item;item.setForeground(QColor('#28733a' if line.startswith('+') else '#b83239'))
         b=QPushButton('暂存勾选的修改');l.addWidget(b);b.clicked.connect(d.accept)
         if d.exec():
             if not any(item.checkState()==Qt.Checked for item in choices.values()):return
@@ -383,7 +387,7 @@ class Panel(QWidget):
         def existing():d.accept();self.add_repo(QFileDialog.getExistingDirectory(self,'选择已有游戏项目'))
         self.button(row,'下载团队项目',download);self.button(row,'添加已有项目',existing);self.button(row,'明白了',d.accept);d.exec()
     def help(self):
-        self.show_text('LX 版本控制 0.0.1\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n运行需要 Git for Windows；完整功能与验证范围见工具目录 README.md / TODO.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
+        self.show_text('LXGit 游戏协作 0.0.2\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n运行需要 Git for Windows；完整功能与验证范围见工具目录 README.md / TODO.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
     def shutdown(self):
         if self.closed:return
         self.closed=True;self.timer.stop()
