@@ -3,7 +3,7 @@
   "kind": "lx-tool",
   "name": "LXGit 游戏协作",
   "description": "给中文游戏开发团队的版本管理工具：下载团队项目、查看修改、保存版本、同步给队友。",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "category": "开发工具",
   "icon": ".lxtool/icon.png",
   "readme": ".lxtool/README.md",
@@ -12,9 +12,9 @@
   "actions": {},
   "files": {
     ".lxtool/icon.png": "d4255c3399e43245cd74ea5992afdcf83ffc1dda0c4a9a1dc01f4dea1792e703",
-    ".lxtool/README.md": "9deaf9ddca6d88c0f858258346818f43126a4b3147b0034c9811e8d9f00df95b",
+    ".lxtool/README.md": "7fc77e80e764b091a75b677647dad146e2636339d56822e098794aa433ab0cbe",
     ".lxtool/panel.json": "33c566bd351e31a0078b96a2992f97dda29f174cad1526590c94b293fd2e993f",
-    "ui/panel.py": "a90376a7f5ffb1c2a1d13a6cb24f0ff8d72916c2eebbfca7a517ad0e7db357f4",
+    "ui/panel.py": "7aaae7f46791c8b6db97c19d335691f187b549b1218410e71454dac70aeb234b",
     "bin/LXGit-worker.exe": "882c2c168b648ee0e335d138991df3b801e3a5bfc04ad963f7d5838a90de0802"
   },
   "releaseNotes": "亮色界面：白色工作区、浅绿色导航与深色文字，优化差异文本可读性。"
