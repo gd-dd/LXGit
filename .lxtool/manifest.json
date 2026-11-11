@@ -3,7 +3,7 @@
   "kind": "lx-tool",
   "name": "LXGit 游戏协作",
   "description": "给中文游戏开发团队的版本管理工具：下载团队项目、查看修改、保存版本、同步给队友。",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "category": "开发工具",
   "icon": ".lxtool/icon.png",
   "readme": ".lxtool/README.md",
@@ -12,12 +12,12 @@
   "actions": {},
   "files": {
     ".lxtool/icon.png": "d4255c3399e43245cd74ea5992afdcf83ffc1dda0c4a9a1dc01f4dea1792e703",
-    ".lxtool/README.md": "11b94c0da462f91ad5919473eea2a533826ad94968f064364fea09a92ab885dd",
+    ".lxtool/README.md": "e8fd8eebaa79af811f479feee8b8524c0aa2aa218c59b18707e937349058090e",
     ".lxtool/panel.json": "33c566bd351e31a0078b96a2992f97dda29f174cad1526590c94b293fd2e993f",
-    "ui/panel.py": "b7284f1e951fd890cf71576738e204c982003535753d850fc600574b1a2470f4",
+    "ui/panel.py": "da08354a08b19f6a2bf52c6283435a20f55f7f2c705901a7c3e401d5300259b0",
     "ui/runtime_paths.py": "6ccc3db64953022f01e58136c4779f2c092cafbe567b3c1503af507952d6c547",
     "backend/git_runtime.py": "c3e4d81a44063cef102e8cbafa822713c03a1bbcd730e9c52211184a683d6924",
     "bin/LXGit-worker.exe": "5078bf34e6d5986390c6d3d176dfc25ae39f6e54b64d58ec3798c6f2dbf81f7c"
   },
-  "releaseNotes": "首次打开自动准备官方完整 Git，保存在工具目录；支持进度、取消、重试及离线复用，保留手动 Git 设置。"
+  "releaseNotes": "重新整理日常操作：项目、分支、同步与更多分组收纳，扩大文件和差异区，改善小窗口与高缩放显示。"
 }

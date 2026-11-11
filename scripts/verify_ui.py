@@ -27,6 +27,8 @@ def main():
   p.files.setCurrentRow(0);wait();assert '+新的内容' in p.diff.toPlainText()
   p.stage_all();wait();assert p.state['files'][0]['status']=='M '
   p.message.setText('界面提交');p.commit_button.click();wait();assert not p.state['files'];assert g.run('log','-1','--format=%s')=='界面提交'
+  p.amend.setChecked(True);p.message.setText('界面提交');p.description='修订后的详细说明';p.update_commit_ui();assert p.commit_button.text()=='修订本地版本'
+  p.confirm=lambda text:True;p.commit_button.click();wait();assert not p.amend.isChecked();assert not p.description;assert p.commit_button.text()=='保存本地版本';assert '已填写详细说明' not in p.commit_options.toolTip()
   p.tabs.setCurrentIndex(1);wait();assert p.history.count()==2;p.history.setCurrentRow(0);wait();assert '界面提交' in p.commit_diff.toPlainText()
   (ROOT/'runtime').mkdir(exist_ok=True);parent.grab().save(str(ROOT/'runtime/ui-history.png'))
   p.tabs.setCurrentIndex(0)
@@ -43,6 +45,7 @@ def main():
    QTimer.singleShot(50,select_partial)
   QTimer.singleShot(50,select_partial);p.partial_stage();wait()
   assert g.run('show',':说明.txt',raw=True).decode('utf-8')=='新的内容\n尾行\n'
+  p.message.setText('修订后的普通提交');p.commit_button.click();wait();assert g.run('log','-1','--format=%s')=='修订后的普通提交';assert p.commit_button.text()=='保存本地版本'
   (repo/'新文件.txt').write_text('创建内容','utf-8');p.refresh();wait();parent.grab().save(str(ROOT/'runtime/ui-changes.png'))
   handle.shutdown();handle.shutdown();assert p.closed;assert not p.timer.isActive()
   second=NativePanelHandle(tool,base/'config',parent);p=second.widget;p.warn=errors.append;wait();assert repo.resolve()==Path(p.repo).resolve();second.shutdown();parent.close()
