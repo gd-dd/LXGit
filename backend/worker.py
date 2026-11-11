@@ -13,6 +13,12 @@ import sys
 import urllib.request
 import urllib.error
 import urllib.parse
+if not getattr(sys,'frozen',False) and not __package__:
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+try:
+    from backend import git_runtime
+except ImportError:
+    import git_runtime
 
 class GitError(Exception):
     pass
@@ -49,7 +55,7 @@ class Git:
         self.exe=find_git(executable)
         self.repo=str(Path(repo).resolve()) if repo else None
     def run(self,*args,input=None,check=True,timeout=300,raw=False,extra_env=None):
-        env=dict(os.environ,GIT_TERMINAL_PROMPT='0',GCM_INTERACTIVE='never',GIT_EDITOR='true',GIT_SEQUENCE_EDITOR='true',LC_ALL='C.UTF-8')
+        env=dict(git_runtime.git_env(Path(self.exe).parent.parent),GIT_TERMINAL_PROMPT='0',GCM_INTERACTIVE='never',GIT_EDITOR='true',GIT_SEQUENCE_EDITOR='true',LC_ALL='C.UTF-8')
         # Literal pathspecs ensure files named *, [, or :(...) are never interpreted as patterns.
         env.pop('GIT_LITERAL_PATHSPECS',None)
         if args and args[0] in ('add','restore','rm','diff','ls-files','checkout'):
@@ -128,7 +134,12 @@ def remote_repo(g):
 
 
 def dispatch(req):
-    op=req['op'];a=req.get('args',{});g=Git(req.get('repo',''),req.get('git',''))
+    op=req['op'];a=req.get('args',{})
+    executable=req.get('git','')
+    if req.get('package') and not executable:
+        executable=git_runtime.ready(git_runtime.runtime_root(req['package']),verify=False)
+        if not executable:raise GitError('工具私有 Git 尚未就绪，请先准备或在设置中选择 Git。')
+    g=Git(req.get('repo',''),executable)
     host=req.get('host','github.com').lower().strip()
     if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?',host):raise GitError('GitHub 服务地址应填写域名，不包含协议或路径。')
     g.host=host
@@ -143,7 +154,7 @@ def dispatch(req):
         return g.run('clone','--progress','--',url,str(Path(a['path']).resolve()),timeout=1800)
     if op=='login':
         # Interactive browser/device authorization is an explicit user action.
-        env=dict(os.environ,GCM_INTERACTIVE='always',GIT_TERMINAL_PROMPT='0')
+        env=dict(git_runtime.git_env(Path(g.exe).parent.parent),GCM_INTERACTIVE='always',GIT_TERMINAL_PROMPT='0')
         p=subprocess.run([g.exe,'credential-manager','github','login','--url','https://'+g.host,'--browser'],env=env,capture_output=True,timeout=300,creationflags=0x08000000 if os.name=='nt' else 0)
         if p.returncode:raise GitError('GitHub 登录失败。请安装含 Git Credential Manager 的 Git for Windows。\n'+clean_error(p.stderr.decode('utf-8','replace')))
         return 'GitHub 授权完成'
@@ -341,8 +352,34 @@ def main():
         shutil.copyfile(sys.argv[2],sys.argv[3]);return
     try:
         job=own_process_tree()
-        request=json.loads(sys.stdin.buffer.read().decode('utf-8'))
-        result={'ok':True,'data':dispatch(request)}
+        line=bytearray()
+        while True:
+            byte=os.read(sys.stdin.fileno(),1)
+            if not byte or byte==b'\n':break
+            line.extend(byte)
+            if len(line)>4*1024*1024:raise GitError('后台请求过大。')
+        request=json.loads(line.decode('utf-8'))
+        if request['op']=='prepare_git':
+            import threading
+            cancel=threading.Event();stop=threading.Event()
+            def listen():
+                import ctypes,msvcrt
+                from ctypes import wintypes
+                peek=ctypes.WinDLL('kernel32',use_last_error=True).PeekNamedPipe
+                peek.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,ctypes.c_void_p,ctypes.POINTER(wintypes.DWORD),ctypes.c_void_p]
+                peek.restype=wintypes.BOOL
+                handle=msvcrt.get_osfhandle(sys.stdin.fileno())
+                while not stop.wait(.05):
+                    available=wintypes.DWORD()
+                    if not peek(handle,None,0,None,ctypes.byref(available),None):cancel.set();return
+                    if available.value:
+                        os.read(sys.stdin.fileno(),1);cancel.set();return
+            listener=threading.Thread(target=listen,daemon=True);listener.start()
+            def progress(phase,done,total):
+                sys.stdout.buffer.write((json.dumps({'progress':phase,'done':done,'total':total},ensure_ascii=False)+'\n').encode('utf-8'));sys.stdout.buffer.flush()
+            try:result={'ok':True,'data':git_runtime.prepare(request['package'],cancel,progress)}
+            finally:stop.set();listener.join(timeout=1)
+        else:result={'ok':True,'data':dispatch(request)}
     except Exception as e: result={'ok':False,'error':clean_error(e)}
     sys.stdout.buffer.write(json.dumps(result,ensure_ascii=False).encode('utf-8'));sys.stdout.buffer.flush()
 

@@ -1,12 +1,13 @@
 """Tool-owned native QWidget, host API 1. No host-global state changes."""
 import json
 import base64
+from .runtime_paths import runtime_root, no_links
 from pathlib import Path
-from PySide6.QtCore import Qt,QProcess,QTimer,QUrl
+from PySide6.QtCore import Qt,QProcess,QTimer,QUrl,QProcessEnvironment
 from PySide6.QtGui import QDesktopServices,QPixmap,QFont,QSyntaxHighlighter,QTextCharFormat,QColor
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,QLineEdit,
     QTextEdit,QPlainTextEdit,QListWidget,QListWidgetItem,QSplitter,QTabWidget,QFileDialog,QInputDialog,
-    QMessageBox,QMenu,QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView)
+    QMessageBox,QMenu,QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QProgressBar)
 
 STYLE='''
 QWidget#LXGit { background:#f7faf3; color:#243227; font-family:"Microsoft YaHei UI"; font-size:13px; }
@@ -48,6 +49,10 @@ class Panel(QWidget):
         self.button(bar,'刷新',self.refresh);root.addLayout(bar)
         sync=QHBoxLayout();self.summary=QLabel('从队友的 GitHub 地址下载游戏项目，或添加电脑上已有的项目。');sync.addWidget(self.summary,1)
         self.button(sync,'检查队友更新',lambda:self.run('fetch'));self.button(sync,'下载更新',lambda:self.run('pull'));self.button(sync,'上传给队友',self.push);root.addLayout(sync)
+        self.git_ready=bool(self.settings.get('git'));self.git_pending=None;self.runtime_buffer=b'';self.runtime_cancelled=False
+        runtimebar=QHBoxLayout();self.runtime_label=QLabel('Git：正在检查工具运行环境…');self.runtime_label.setWordWrap(True);runtimebar.addWidget(self.runtime_label,1)
+        self.runtime_progress=QProgressBar();self.runtime_progress.setMaximumWidth(220);runtimebar.addWidget(self.runtime_progress)
+        self.runtime_retry=self.button(runtimebar,'准备 / 重试',self.prepare_git);self.runtime_cancel=self.button(runtimebar,'取消',self.cancel_git);self.runtime_cancel.setEnabled(False);root.addLayout(runtimebar)
         self.operation=QLabel();self.operation.setWordWrap(True);root.addWidget(self.operation)
         self.tabs=QTabWidget();root.addWidget(self.tabs,1)
         changes=QWidget();cl=QVBoxLayout(changes);split=QSplitter();cl.addWidget(split,1)
@@ -77,6 +82,68 @@ class Panel(QWidget):
         self.timer=QTimer(self);self.timer.setInterval(15000);self.timer.timeout.connect(self.auto_refresh);self.timer.start()
         if self.repositories.count():
             index=self.repositories.findData(self.settings.get('last_repo'));self.repositories.setCurrentIndex(max(index,0));self.repo=self.repositories.currentData();QTimer.singleShot(0,self.refresh)
+        QTimer.singleShot(0,self.prepare_git)
+    def worker_environment(self,p):
+        root=self.context.data_root/'worker-temp' if self.settings.get('git') else runtime_root(self.context.package_root)/'tmp'
+        temp=no_links(root);temp.mkdir(parents=True,exist_ok=True)
+        env=QProcessEnvironment.systemEnvironment();env.insert('TEMP',str(temp));env.insert('TMP',str(temp));p.setProcessEnvironment(env)
+    def prepare_git(self):
+        if self.closed or self.proc:return
+        if self.settings.get('git'):
+            self.git_ready=True;self.runtime_label.setText('使用手动选择的 Git');self.runtime_progress.hide();return
+        try:runtime_root(self.context.package_root)
+        except Exception as error:
+            self.runtime_label.setText(str(error));return
+        self.git_ready=False;self.runtime_cancelled=False;self.runtime_buffer=b''
+        self.runtime_label.setText('正在准备工具私有 Git…');self.runtime_progress.show();self.runtime_progress.setRange(0,0)
+        self.runtime_retry.setEnabled(False);self.runtime_cancel.setEnabled(True)
+        self.proc=QProcess(self);p=self.proc;self.after=('prepare_git',None,False)
+        try:
+            self.worker_environment(p)
+            p.setProgram(str(self.context.resource('bin/LXGit-worker.exe')))
+        except Exception as error:
+            self.start_error(p,error);return
+        p.readyReadStandardOutput.connect(self.runtime_output);p.finished.connect(self.runtime_finished);p.errorOccurred.connect(self.runtime_failed)
+        request={'op':'prepare_git','package':str(self.context.package_root)}
+        p.started.connect(lambda:p.write((json.dumps(request,ensure_ascii=False)+'\n').encode('utf-8')))
+        p.start()
+    def runtime_output(self):
+        if not self.proc:return
+        self.runtime_buffer+=bytes(self.proc.readAllStandardOutput())
+        while b'\n' in self.runtime_buffer:
+            line,self.runtime_buffer=self.runtime_buffer.split(b'\n',1)
+            try:row=json.loads(line)
+            except ValueError:continue
+            if 'progress' in row:
+                self.runtime_label.setText(row['progress']);total=row.get('total',0);done=row.get('done',0)
+                self.runtime_progress.setRange(0,100 if total else 0)
+                if total:self.runtime_progress.setValue(int(done*100/total))
+    def start_error(self,p,error):
+        self.proc=None;self.after=None;self.git_pending=None;p.deleteLater()
+        self.runtime_retry.setEnabled(True);self.runtime_cancel.setEnabled(False);self.runtime_progress.setRange(0,100);self.runtime_progress.setValue(0)
+        message='无法准备后台运行目录或启动资源：'+str(error)+'。请检查工具目录写入权限和磁盘空间后重试。'
+        self.runtime_label.setText(message);self.status.setText('后台未启动');self.log.appendPlainText(message)
+    def runtime_failed(self,error):
+        if error==QProcess.FailedToStart:self.runtime_finished(-1,None)
+    def runtime_finished(self,code,status):
+        if self.closed or not self.proc:return
+        self.runtime_output();p=self.proc;self.proc=None;self.after=None;p.deleteLater()
+        self.runtime_retry.setEnabled(True);self.runtime_cancel.setEnabled(False);self.runtime_progress.setRange(0,100)
+        try:result=json.loads(self.runtime_buffer)
+        except ValueError:result={'ok':False,'error':'Git 准备中断，请重试。'}
+        if result.get('ok') and code==0 and status==QProcess.NormalExit and not self.runtime_cancelled:
+            self.git_ready=True;self.runtime_progress.setValue(100);self.runtime_label.setText('工具私有 Git '+result['data']['version']+' 已就绪（离线可用）')
+            pending=self.git_pending;self.git_pending=None
+            if pending:self.run(*pending)
+        else:
+            self.git_pending=None;self.runtime_progress.setValue(0);self.runtime_label.setText('已取消，可重试' if self.runtime_cancelled else result.get('error','Git 后台异常退出，请重试。'))
+            self.log.appendPlainText(self.runtime_label.text())
+    def cancel_git(self):
+        if self.proc and self.after and self.after[0]=='prepare_git':
+            self.runtime_cancelled=True;self.git_pending=None;self.proc.write(b'c');self.runtime_label.setText('正在取消并清理临时文件…');self.runtime_cancel.setEnabled(False)
+    def use_managed_git(self):
+        if self.proc:return
+        self.settings.pop('git',None);self.save();self.git_ready=False;self.prepare_git()
     def button(self,layout,text,callback):
         b=QPushButton(text);b.clicked.connect(callback);layout.addWidget(b);return b
     def ask(self,title,label,value=''):
@@ -101,13 +168,19 @@ class Panel(QWidget):
         self.settings['last_repo']=self.repo;self.context.save_settings(self.settings)
     def run(self,op,args=None,callback=None,refresh=True):
         if self.closed:return
+        if not self.git_ready:
+            self.git_pending=(op,args,callback,refresh);self.prepare_git();self.status.setText('准备 Git 后继续操作…');return
         if self.proc:
             self.status.setText('上一项操作还在进行，请稍候。');return
         if not self.repo and op not in ('environment','init','clone','login','github_user','github_repos','github_create'):
             self.warn('请先添加、创建或克隆一个仓库。');return
-        request={'op':op,'args':args or {},'repo':self.repo,'git':self.settings.get('git',''),'host':self.settings.get('github_host','github.com')}
+        request={'op':op,'args':args or {},'repo':self.repo,'git':self.settings.get('git',''),'host':self.settings.get('github_host','github.com'),'package':str(self.context.package_root)}
         self.proc=QProcess(self);p=self.proc;self.status.setText('正在处理，请稍候…');self.after=(op,callback,refresh)
-        p.setProgram(str(self.context.resource('bin/LXGit-worker.exe')))
+        try:
+            self.worker_environment(p)
+            p.setProgram(str(self.context.resource('bin/LXGit-worker.exe')))
+        except Exception as error:
+            self.start_error(p,error);return
         p.finished.connect(self.finished);p.errorOccurred.connect(self.failed)
         p.started.connect(lambda:(p.write(json.dumps(request,ensure_ascii=False).encode('utf-8')),p.closeWriteChannel()))
         p.start()
@@ -318,10 +391,12 @@ class Panel(QWidget):
         value=self.ask('Git LFS','大文件匹配规则，例如 *.psd 或 *.fbx')
         if value:self.run('lfs_track',{'pattern':value})
     def settings_menu(self):
-        self.menu([('选择 Git 程序…',self.choose_git),('GitHub / Enterprise 服务地址…',self.host_setting),('选择外部编辑器…',self.choose_editor),('配置 GPG 提交签名…',self.signing),('检查运行环境',lambda:self.run('environment',callback=lambda r:self.show_text('Git：'+r['git']+'\n'+r['version']+'\n'+r['lfs']),refresh=False)),('变基拉取',lambda:self.confirm_run('pull','拉取远程并重放本地提交？',{'rebase':True})),('安全强制推送…',lambda:self.confirm_run('push','使用 force-with-lease 推送改写后的历史。可能替换远端已有提交，确认继续？',{'force':True}))])
+        self.menu([('使用工具管理的 Git / 修复检查',self.use_managed_git),('选择 Git 程序…',self.choose_git),('GitHub / Enterprise 服务地址…',self.host_setting),('选择外部编辑器…',self.choose_editor),('配置 GPG 提交签名…',self.signing),('检查运行环境',lambda:self.run('environment',callback=lambda r:self.show_text('Git：'+r['git']+'\n'+r['version']+'\n'+r['lfs']),refresh=False)),('变基拉取',lambda:self.confirm_run('pull','拉取远程并重放本地提交？',{'rebase':True})),('安全强制推送…',lambda:self.confirm_run('push','使用 force-with-lease 推送改写后的历史。可能替换远端已有提交，确认继续？',{'force':True}))])
     def choose_git(self):
+        if self.proc:
+            self.status.setText("请先取消 Git 准备或等待当前操作完成。");return
         path,_=QFileDialog.getOpenFileName(self,'选择 git.exe','','Git 程序 (git.exe)')
-        if path:self.settings['git']=path;self.save();self.run('environment',callback=lambda r:self.show_text('已配置 '+r['version']),refresh=False)
+        if path:self.settings['git']=path;self.git_ready=True;self.runtime_label.setText('使用手动选择的 Git');self.save();self.run('environment',callback=lambda r:self.show_text('已配置 '+r['version']),refresh=False)
     def github_menu(self):
         self.menu([('GitHub 登录（浏览器授权）',lambda:self.run('login',refresh=False)),('查看当前账号',lambda:self.run('github_user',callback=lambda r:self.show_text('已登录：'+r['login']),refresh=False)),('从我的 GitHub 仓库克隆…',lambda:self.run('github_repos',callback=self.pick_github_repo,refresh=False)),('创建 GitHub 仓库…',self.create_github_repo),('派生当前仓库…',lambda:self.confirm_run('github_fork','在当前 GitHub 账号下派生此仓库？')),('在浏览器打开仓库',lambda:self.run('github_url',callback=lambda url:QDesktopServices.openUrl(QUrl(url)),refresh=False)),('查看并检出拉取请求…',lambda:self.run('github_prs',callback=self.pick_pr,refresh=False)),('创建拉取请求…',self.create_pr)])
     def pick_github_repo(self,rows):
@@ -387,11 +462,13 @@ class Panel(QWidget):
         def existing():d.accept();self.add_repo(QFileDialog.getExistingDirectory(self,'选择已有游戏项目'))
         self.button(row,'下载团队项目',download);self.button(row,'添加已有项目',existing);self.button(row,'明白了',d.accept);d.exec()
     def help(self):
-        self.show_text('LXGit 游戏协作 0.0.5\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n运行需要 Git for Windows；完整功能与验证范围见工具目录 README.md / TODO.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
+        self.show_text('LXGit 游戏协作 0.0.6\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n首次打开会自动准备工具私有 Git，可取消并重试；也可在设置中手动选择 Git。完整功能与验证范围见工具目录 README.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
     def shutdown(self):
         if self.closed:return
         self.closed=True;self.timer.stop()
         if self.proc:
-            self.proc.blockSignals(True);self.proc.kill();self.proc.waitForFinished(1500);self.proc.deleteLater();self.proc=None
+            self.proc.blockSignals(True)
+            if self.after and self.after[0]=='prepare_git':self.proc.write(b'c');self.proc.waitForFinished(2000)
+            self.proc.kill();self.proc.waitForFinished(1500);self.proc.deleteLater();self.proc=None
 
 def create_panel(context,parent):return Panel(context,parent)
