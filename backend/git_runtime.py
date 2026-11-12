@@ -20,6 +20,9 @@ SPEC = dict(version='2.56.1.windows.1', size=60125512,
     sha256='9dd04a608ceb5f6ab32a73709e0ecb159d211da71b697c45ff81f6dd0c6b49c7',
     url='https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/PortableGit-2.56.1-64-bit.7z.exe')
 FLAGS = 0x08000000 if os.name == 'nt' else 0
+RENAME_TIMEOUT = 12.0
+CLEANUP_TIMEOUT = 2.0
+RETRY_WINERRORS = {5, 32, 33}
 
 class Cancelled(Exception): pass
 
@@ -81,12 +84,56 @@ def locked(root):
     finally:
         f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1);f.close()
 
+def retry_filesystem(action,cancel=None,progress=lambda *a:None,timeout=None):
+    """Retry only Windows access/sharing/lock errors; never bypass permissions."""
+    deadline=time.monotonic()+(RENAME_TIMEOUT if timeout is None else timeout)
+    warned=False
+    while True:
+        if cancel is not None:check_cancel(cancel)
+        try:return action()
+        except OSError as error:
+            if getattr(error,'winerror',None) not in RETRY_WINERRORS:raise
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise
+            if not warned:progress('等待 Windows 释放 Git 文件占用…',0,0);warned=True
+            delay=min(.1,remaining)
+            if cancel is None:time.sleep(delay)
+            else:cancel.wait(delay)
+
+def rename_with_retry(source,target,cancel,progress=lambda *a:None,timeout=None):
+    def rename():
+        no_links(source);no_links(target)
+        if target.exists():raise FileExistsError('Git 目标目录已存在：'+str(target))
+        return source.rename(target)
+    return retry_filesystem(rename,cancel,progress,timeout)
+
 def remove_staging(root,path):
     no_links(path)
     if path.parent!=root or not path.name.startswith('.stage-'):raise ValueError('临时目录越界。')
-    if path.exists():
-        for p in path.rglob('*'):no_links(p)
-        shutil.rmtree(path)
+    def remove():
+        no_links(path)
+        if path.exists():
+            for p in path.rglob('*'):no_links(p)
+            shutil.rmtree(path)
+    retry_filesystem(remove,timeout=CLEANUP_TIMEOUT)
+
+def activate_payload(payload,target,cancel,progress):
+    """Publish by same-volume rename; restore an isolated old target on failure."""
+    backup=None
+    if target.exists():
+        backup=target.parent/('invalid-'+SPEC['version']+'-'+uuid.uuid4().hex)
+        rename_with_retry(target,backup,cancel,progress)
+    try:
+        rename_with_retry(payload,target,cancel,progress)
+    except BaseException as error:
+        if backup is not None:
+            # Restoration must finish even when the user has cancelled promotion.
+            try:rename_with_retry(backup,target,None,progress)
+            except Exception as restore_error:
+                raise ValueError('Git 切换失败；旧目录保留在 '+str(backup)+'。恢复失败：'+str(restore_error)+'；原错误：'+str(error)) from error
+        if isinstance(error,OSError):
+            raise ValueError('Git 已解压并验证，但无法切换运行目录。请确认工具目录有写入权限，等待文件占用解除后重试。'+str(error)) from error
+        raise
 
 class SecureRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,req,fp,code,msg,headers,newurl):
@@ -139,6 +186,7 @@ def prepare(package,cancel,progress=lambda *a:None):
         staging=root/('.stage-'+uuid.uuid4().hex);archive=staging/'PortableGit.7z.exe';payload=staging/'PortableGit'
         if len(str(payload))+86>=250:raise ValueError('工具目录路径过长，无法可靠解压 Git；请将工具架放到较短路径，或手动选择已有 Git。')
         staging.mkdir()
+        primary_error=None;result=None
         try:
             download(archive,cancel,progress);check_cancel(cancel)
             progress('校验官方数字签名',0,0);signer=signature(archive);check_cancel(cancel)
@@ -165,8 +213,21 @@ def prepare(package,cancel,progress=lambda *a:None):
             marker=dict(version=SPEC['version'],archiveSha256=SPEC['sha256'],signer=signer,probes=versions,files={f:digest(payload/f) for f in required})
             (payload/'lxgit-ready.json').write_text(json.dumps(marker,ensure_ascii=False,indent=2),'utf-8')
             check_cancel(cancel);target=root/SPEC['version']
-            if target.exists():target.rename(root/('invalid-'+SPEC['version']+'-'+uuid.uuid4().hex))
-            payload.rename(target)
+            progress('启用已验证的 Git',0,0);activate_payload(payload,target,cancel,progress)
+            result={'git':str(target/'cmd/git.exe'),'version':SPEC['version'],'reused':False}
             progress('Git 已就绪',1,1)
-            return {'git':str(target/'cmd/git.exe'),'version':SPEC['version'],'reused':False}
-        finally:remove_staging(root,staging)
+            return result
+        except BaseException as error:
+            primary_error=error;raise
+        finally:
+            try:remove_staging(root,staging)
+            except Exception as cleanup_error:
+                if primary_error is not None:
+                    warning='临时目录清理失败，已保留 '+str(staging)+'：'+str(cleanup_error)
+                    primary_error.cleanup_warning=warning
+                    if hasattr(primary_error,'add_note'):primary_error.add_note(warning)
+                elif result is not None:
+                    # The verified target is already active; a temporary-file lock
+                    # must not turn a successful preparation into a false failure.
+                    result['cleanupWarning']='Git 可继续使用；临时目录尚未清理：'+str(staging)+'；'+str(cleanup_error)+'。请在关闭 LXGit 并释放文件占用后清理该临时目录。'
+                else:raise

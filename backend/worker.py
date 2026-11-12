@@ -380,7 +380,9 @@ def main():
             try:result={'ok':True,'data':git_runtime.prepare(request['package'],cancel,progress)}
             finally:stop.set();listener.join(timeout=1)
         else:result={'ok':True,'data':dispatch(request)}
-    except Exception as e: result={'ok':False,'error':clean_error(e)}
+    except Exception as e:
+        result={'ok':False,'error':clean_error(e)}
+        if getattr(e,'cleanup_warning',None):result['cleanupWarning']=clean_error(e.cleanup_warning)
     sys.stdout.buffer.write(json.dumps(result,ensure_ascii=False).encode('utf-8'));sys.stdout.buffer.flush()
 
 if __name__=='__main__':main()
