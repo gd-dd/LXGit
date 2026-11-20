@@ -116,15 +116,20 @@ class LayoutFixture:
         if natural_host:
             self.window.setMinimumSize(0, 0)
         self.window.findChild(QWidget, 'sidebar').setFixedWidth(280)
-        self.window.panel_title.setText('LXGit 游戏协作 · 0.0.6')
-        self.window.move_combo.addItem('未分类')
-        self.window.pages.setCurrentWidget(self.window.tool_panel)
         # The explicit inert path suppresses scheduled bootstrap without executing anything.
         with patch.object(PanelContext, 'load_settings', return_value={'git': str(self.base / 'never-run/git.exe')}):
-            self.window.workspace.display(tool)
-        handle = getattr(self.window.workspace, 'native_panel', None)
+            if minimal_host:
+                self.window.panel_title.setText(tool['name'])
+                self.window.pages.setCurrentWidget(self.window.tool_panel)
+                workspace=self.window.workspace
+                workspace.display(tool)
+            else:
+                with patch.object(self.window,'installed',return_value=[tool]):
+                    self.window.open_workflow_tool(tool['id'])
+                workspace=self.window.running_tools[tool['id']]
+        handle = getattr(workspace, 'native_panel', None)
         if handle is None or handle.widget is None:
-            error = '\n'.join(w.text() for w in self.window.workspace.findChildren(QLabel))
+            error = '\n'.join(w.text() for w in workspace.findChildren(QLabel))
             self.close()
             raise AssertionError('Real NativePanelHandle failed to construct fixture: ' + error)
         self.handle = handle
@@ -393,6 +398,19 @@ class PanelLayoutTests(unittest.TestCase):
             drain(self.app)
             self.assertTrue(all(value > 0 for value in splitter.sizes()))
             self.assertNotEqual(splitter.sizes(), before)
+            from PySide6.QtTest import QTest
+            handle=splitter.handle(1)
+            self.assertEqual(splitter.handleWidth(),8)
+            self.assertTrue(handle.isVisible())
+            start=handle.rect().center()
+            end=start+QPoint(18,0)
+            before=splitter.sizes()
+            QTest.mousePress(handle,Qt.MouseButton.LeftButton,pos=start)
+            QTest.mouseMove(handle,end)
+            QTest.mouseRelease(handle,Qt.MouseButton.LeftButton,pos=end)
+            after=splitter.sizes()
+            self.assertGreater(after[0],before[0])
+            self.assertLess(after[1],before[1])
 
     def test_long_file_and_branch_remain_available_as_tooltips(self):
         self.fixture.long_content()

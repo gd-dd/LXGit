@@ -22,7 +22,8 @@ QWidget#LXGit QLineEdit, QWidget#LXGit QPlainTextEdit, QWidget#LXGit QTextEdit, 
 QWidget#LXGit QTabWidget::pane {border:1px solid #d5e1ca;}
 QWidget#LXGit QTabBar::tab {background:#edf3e6; color:#53644a; padding:7px 16px;}
 QWidget#LXGit QTabBar::tab:selected {color:#365c19; background:#deedc8;}
-QWidget#LXGit QSplitter::handle {background:#d5e1ca; width:6px;}
+QWidget#LXGit QSplitter::handle {background:#9fb68d;}
+QWidget#LXGit QSplitter::handle:hover {background:#61834b;}
 QWidget#LXGit QMenu {background:#ffffff; color:#243227; border:1px solid #c6d9b1;}
 QWidget#LXGit QMenu::item:selected {background:#deedc8; color:#243227;}
 QWidget#LXGit QAbstractItemView::item:selected {background:#deedc8; color:#243227;}
@@ -83,7 +84,7 @@ class Panel(QWidget):
         self.operation=ElidedLabel();self.operation.hide();root.addWidget(self.operation)
         self.tabs=QTabWidget();root.addWidget(self.tabs,1)
         changes=QWidget();cl=QVBoxLayout(changes);cl.setContentsMargins(6,6,6,6);cl.setSpacing(6)
-        self.workspace_split=QSplitter();split=self.workspace_split;split.setChildrenCollapsible(False);split.setHandleWidth(6);cl.addWidget(split,1)
+        self.workspace_split=QSplitter();split=self.workspace_split;split.setChildrenCollapsible(False);split.setHandleWidth(8);cl.addWidget(split,1)
         left=QWidget();left.setMinimumWidth(170);ll=QVBoxLayout(left);ll.setContentsMargins(0,0,0,0);ll.setSpacing(5)
         filebar=QHBoxLayout();filebar.setSpacing(4);self.filter=QLineEdit();self.filter.setMinimumWidth(0);self.filter.setPlaceholderText('搜索改动…');filebar.addWidget(self.filter,1);self.button(filebar,'文件…',self.changes_menu);ll.addLayout(filebar)
         self.files=QListWidget();self.files.setMinimumSize(0,100);self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);self.files.setTextElideMode(Qt.ElideMiddle);self.files.setSelectionMode(QAbstractItemView.ExtendedSelection);ll.addWidget(self.files,1)
@@ -106,7 +107,7 @@ class Panel(QWidget):
         self.changes_page=changes;self.tabs.addTab(changes,'我修改的内容')
         history=QWidget();hl=QVBoxLayout(history);hl.setContentsMargins(6,6,6,6);hl.setSpacing(6)
         self.history_search=QLineEdit();self.history_search.setPlaceholderText('搜索已加载历史（最近 200 条）');hl.addWidget(self.history_search)
-        self.history_split=QSplitter();hs=self.history_split;hs.setChildrenCollapsible(False);hs.setHandleWidth(6)
+        self.history_split=QSplitter();hs=self.history_split;hs.setChildrenCollapsible(False);hs.setHandleWidth(8)
         self.history=QListWidget();self.history.setMinimumSize(150,70);self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);self.history.setTextElideMode(Qt.ElideMiddle);hs.addWidget(self.history)
         self.commit_diff=QPlainTextEdit();self.commit_diff.setMinimumSize(200,70);self.commit_diff.setReadOnly(True);self.commit_diff.setFont(QFont('Consolas',10));self.commit_diff.setStyleSheet('font-family:Consolas,"Microsoft YaHei UI";font-size:14px;');hs.addWidget(self.commit_diff)
         hs.setStretchFactor(0,3);hs.setStretchFactor(1,7);hs.setSizes([280,650]);hl.addWidget(hs,1)
