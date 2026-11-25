@@ -3,7 +3,7 @@
   "kind": "lx-tool",
   "name": "LXGit 游戏协作",
   "description": "给中文游戏开发团队的版本管理工具：下载团队项目、查看修改、保存版本、同步给队友。",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "category": "开发工具",
   "icon": ".lxtool/icon.png",
   "readme": ".lxtool/README.md",
@@ -14,11 +14,11 @@
     ".lxtool/icon.png": "d4255c3399e43245cd74ea5992afdcf83ffc1dda0c4a9a1dc01f4dea1792e703",
     ".lxtool/README.md": "9eab37ec8f89c1737761c3e0f473a66191b612d401dd3a6a6b59e623b7208973",
     ".lxtool/panel.json": "33c566bd351e31a0078b96a2992f97dda29f174cad1526590c94b293fd2e993f",
-    "ui/panel.py": "06ca1e9c95c18dd9a45d73089c1f7a6edd36b81a2e5cddfa892488ad20887661",
+    "ui/panel.py": "456c2b934132d34eb5b6143c1ccfdde9754c1cab0d3718d8fc1eafa065c7064a",
     "ui/runtime_paths.py": "6ccc3db64953022f01e58136c4779f2c092cafbe567b3c1503af507952d6c547",
     "backend/git_runtime.py": "38af520aa17df3c354e8584d06d5f65355296260517e0f2aec1c4c1bbf11e7f5",
     "bin/LXGit-worker.exe": "39a7decacd67f2d54e5ab663631f2397dc790663d8ed0e6121e344819dc90951"
   },
-  "releaseNotes": "动画资产库与 LXMaxAnimation 共用同一工作区，并协调两端同步操作。可在分支和储藏中查找云端覆盖前的备份。",
+  "releaseNotes": "联动 LXMaxAnimation 的共享资产库，支持从分支和储藏找回覆盖前的备份；关闭工具时释放同一资产库的操作状态。",
   "publishedAt": "2026-11-26"
 }

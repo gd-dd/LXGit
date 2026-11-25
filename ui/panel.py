@@ -68,6 +68,7 @@ class Panel(QWidget):
         self.repositories=QComboBox();self.repositories.setMinimumWidth(80);self.repositories.setMinimumContentsLength(4)
         self.repositories.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed);self.repositories.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.animation_repo=None
+        self.working_root=None
         self.repositories.setToolTip('选择当前游戏项目；添加和下载项目请打开右侧“项目”')
         for p in self.settings.get('repositories',[]):
             self.repositories.addItem(Path(p).name,p);self.repositories.setItemData(self.repositories.count()-1,p,Qt.ToolTipRole)
@@ -418,17 +419,18 @@ class Panel(QWidget):
         p.finished.connect(self.finished);p.errorOccurred.connect(self.failed)
         p.started.connect(lambda:(p.write(json.dumps(request,ensure_ascii=False).encode('utf-8')),p.closeWriteChannel()))
         if self.repo and op not in ('snapshot','history','diff','show'):
-            root=self.repo
-            workspace['lxgit_working_root']=root
-            def release(*_):
-                if workspace.get('lxgit_working_root')==root:
-                    workspace.pop('lxgit_working_root',None)
-            p.finished.connect(release)
-            p.errorOccurred.connect(release)
+            self.working_root=self.repo
+            workspace['lxgit_working_root']=self.working_root
         p.start()
+    def release_working_root(self,*_):
+        workspace=getattr(self.context,'workspace_state',{})
+        if self.working_root and workspace.get('lxgit_working_root')==self.working_root:
+            workspace.pop('lxgit_working_root',None)
+        self.working_root=None
     def failed(self,error):
         if self.closed:return
         if error==QProcess.FailedToStart:
+            self.release_working_root()
             p=self.proc;self.proc=None;self.after=None
             if p:p.deleteLater()
             self.warn('后台程序无法启动，请检查工具包是否完整。');self.status.setText('启动失败')
@@ -437,6 +439,7 @@ class Panel(QWidget):
         p=self.proc
         if not p:return
         meta=self.after;self.after=None;self.proc=None
+        self.release_working_root()
         data=bytes(p.readAllStandardOutput());err=bytes(p.readAllStandardError()).decode('utf-8','replace');p.deleteLater()
         op,callback,refresh=meta
         try:result=json.loads(data.decode('utf-8'))
@@ -734,5 +737,6 @@ class Panel(QWidget):
             self.proc.blockSignals(True)
             if self.after and self.after[0]=='prepare_git':self.proc.write(b'c');self.proc.waitForFinished(2000)
             self.proc.kill();self.proc.waitForFinished(1500);self.proc.deleteLater();self.proc=None
+        self.release_working_root()
 
 def create_panel(context,parent):return Panel(context,parent)
