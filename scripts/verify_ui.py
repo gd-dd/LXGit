@@ -204,6 +204,21 @@ def main():
         assert index_content == '新的内容\n尾行\n', repr(index_content)
         assert parent.grab().save(str(OUTPUT / 'workspace.png'))
 
+        # A branch switch can change files while both versions have a clean change list.
+        g.run('add', '.')
+        g.run('commit', '-m', '准备切换分支')
+        g.run('branch', '旧版示例', 'HEAD^')
+        panel.refresh()
+        wait()
+        assert not panel.state['files'] and find(panel.local_tree, '本地草稿.txt')
+        panel.run('switch', {'branch': '旧版示例'})
+        wait()
+        assert not panel.state['files']
+        assert not find(panel.local_tree, '本地草稿.txt')
+        panel.run('switch', {'branch': 'main'})
+        wait()
+        assert not panel.state['files'] and find(panel.local_tree, '本地草稿.txt')
+
         handle.shutdown()
         handle.shutdown()
         assert panel.closed and not panel.timer.isActive()
@@ -214,7 +229,7 @@ def main():
         assert repo.resolve() == Path(panel.repo).resolve()
         second.shutdown()
         parent.close()
-    print('PASS: native host, packaged worker, remote and local trees, contextual diff, inclusion, removal, commit, history, partial staging and reopen')
+    print('PASS: native host, packaged worker, remote and local trees, contextual diff, inclusion, removal, commit, history, partial staging, clean branch switching and reopen')
 
 
 if __name__ == '__main__':

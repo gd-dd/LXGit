@@ -138,6 +138,7 @@ class LayoutFixture:
             raise AssertionError('Real NativePanelHandle failed to construct fixture: ' + error)
         self.handle = handle
         self.panel = handle.widget
+        self.local_paths = (FILE, READY_FILE)
         self.panel.run = Mock(name='no_worker_or_repo_operations', side_effect=self.fixture_worker)
         self.panel.warn = Mock(side_effect=AssertionError('Unexpected modal in layout QA'))
         self.panel.timer.stop()
@@ -177,7 +178,7 @@ class LayoutFixture:
             return
         args = args or {}
         side, path = args['side'], args.get('path', '')
-        paths = (FILE, READY_FILE) if side == 'local' else (REMOTE_FILE,)
+        paths = self.local_paths if side == 'local' else (REMOTE_FILE,)
         prefix = path + '/' if path else ''
         entries = {}
         for candidate in paths:
@@ -490,6 +491,25 @@ class PanelLayoutTests(unittest.TestCase):
         self.fixture.open_and_close_menu(request(pending), '查看未加入的差异')
         self.assertEqual(p.run.call_args.args[0], 'diff')
         self.assertEqual(p.run.call_args.args[1]['path'], FILE)
+
+    def test_clean_head_change_refreshes_local_directory_tree(self):
+        self.fixture.long_content()
+        p = self.panel
+        clean = dict(p.state, files=[], head='b' * 40)
+        p.render(clean)
+        drain(self.app)
+        self.assertIsNone(p.directory_item('local', '新目录'))
+
+        self.fixture.local_paths += ('新目录/刚拿到的文件.txt',)
+        p.run.reset_mock()
+        p.render(dict(clean, head='c' * 40))
+        drain(self.app)
+        self.assertIsNotNone(p.directory_item('local', '新目录'))
+        self.assertTrue(any(call.args[:2] == ('tree', {'side': 'local', 'path': ''})
+                            for call in p.run.call_args_list))
+        self.assertFalse(any(call.args[:2] == ('tree', {
+            'side': 'remote', 'path': '', 'commit': REMOTE_COMMIT})
+            for call in p.run.call_args_list))
 
     def test_expanding_directories_reads_local_and_pinned_remote_independently(self):
         self.fixture.long_content()

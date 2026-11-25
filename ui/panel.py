@@ -613,13 +613,14 @@ class Panel(QWidget):
         elif not commit:
             self.remote_tree.clear()
         self.remote_signature=commit
-        changes=tuple((f['path'],f['status']) for f in self.state['files'])
-        if self.directory_scan or changes!=self.local_signature:
+        status=tuple((f['path'],f['status']) for f in self.state['files'])
+        signature=(self.state.get('branch'),self.state.get('head'),status)
+        if self.directory_scan or signature!=self.local_signature:
             self.directory_requests['local','']=''
             for path in self.expanded_directories('local'):
                 self.directory_requests['local',path]=''
         self.directory_scan=False
-        self.local_signature=changes
+        self.local_signature=signature
         QTimer.singleShot(0,self.load_next_directory)
 
     def expanded_directories(self,side):
@@ -732,7 +733,7 @@ class Panel(QWidget):
         path=info['path'] if info else ''
         if side=='remote':
             commit=self.remote_signature
-            entries=[('获取远端快照',lambda:self.run('fetch')),('拉取更新到本地',lambda:self.run('pull'))]
+            entries=[('获取远端快照',lambda:self.run('fetch')),('拉取项目更新到本地',lambda:self.run('pull'))]
             if info and commit:
                 entries.append(('与本地提交比较…',lambda:self.run('workspace_diff',{'path':path,'commit':commit},lambda text:self.diff_dialog(path,text),False)))
                 if info['kind']=='file':

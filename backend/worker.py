@@ -132,6 +132,7 @@ class Git:
                 old=raw[i];i+=1
             files.append({'status':status,'path':path,'old':old,'conflict':status in ('DD','AU','UD','UA','DU','AA','UU')})
         branch=self.run('symbolic-ref','--short','HEAD',check=False)
+        head=self.run('rev-parse','--verify','HEAD',check=False,extra_env=LOCAL_OBJECTS)
         upstream=self.run('rev-parse','--abbrev-ref','--symbolic-full-name','@{upstream}',check=False)
         counts=self.run('rev-list','--left-right','--count','HEAD...@{upstream}',check=False).split()
         branches=self.run('for-each-ref','--format=%(refname:short)','refs/heads','refs/remotes').splitlines()
@@ -140,7 +141,7 @@ class Git:
             q=Path(self.run('rev-parse','--git-path',path))
             if not q.is_absolute(): q=Path(self.repo)/q
             if q.exists() and name not in operations:operations.append(name)
-        return dict(root=root,branch=branch or '分离头指针',files=files,branches=branches,upstream=upstream,
+        return dict(root=root,branch=branch or '分离头指针',head=head,files=files,branches=branches,upstream=upstream,
             ahead=int(counts[0]) if counts else 0,behind=int(counts[1]) if counts else 0,
             operations=operations,remotes=self.run('remote','-v'),tags=self.run('tag').splitlines(),
             stashes=self.run('stash','list','--format=%gd%x09%gs').splitlines(),remoteTree=self.remote_tree(branch))
