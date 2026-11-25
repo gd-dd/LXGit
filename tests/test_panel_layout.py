@@ -15,8 +15,9 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 QA = ROOT / 'runtime/ui-layout-20261112'
-HOST = ROOT.parent / 'LXTools/src'
-for key, folder in {'TEMP': 'temp', 'TMP': 'temp', 'HOME': 'home',
+HOST = next(parent / 'LXTools/src' for parent in ROOT.parents
+            if (parent / 'LXTools/src/native_panels.py').is_file())
+for key, folder in {'TEMP': 'temp', 'TMP': 'temp',
                     'USERPROFILE': 'home', 'APPDATA': 'roaming',
                     'LOCALAPPDATA': 'local', 'XDG_CACHE_HOME': 'cache'}.items():
     location = QA / 'environment' / folder
@@ -28,7 +29,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(HOST))
 from PySide6.QtCore import QPoint, QRect, Qt, QProcess, QTimer, QCoreApplication, QEvent, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QFont, QFontDatabase, QPixmap, QColor
-from PySide6.QtWidgets import QApplication, QWidget, QSplitter, QLabel, QDialog, QLayout, QPushButton, QAbstractScrollArea, QMenu, QHBoxLayout, QVBoxLayout, QComboBox, QStackedWidget
+from PySide6.QtWidgets import QApplication, QWidget, QSplitter, QLabel, QDialog, QLayout, QPushButton, QAbstractScrollArea, QMenu, QHBoxLayout, QVBoxLayout, QComboBox, QStackedWidget, QPlainTextEdit
 from core import ToolStore
 from desktop import Window, STYLE
 from native_panels import PanelContext
@@ -37,6 +38,9 @@ from repository_panels import RepositoryWorkspace
 PROJECT = '星海冒险_大学生游戏开发团队_课程设计与毕业作品_第七组_超长项目名称'
 BRANCH = 'feature/' + '角色移动与多人联机同步功能开发_' * 6
 FILE = 'Assets/游戏资源/角色/主角/' + '超长中文模型贴图与场景文件名_' * 7 + '.prefab'
+READY_FILE = 'Assets/游戏资源/准备提交.cs'
+REMOTE_FILE = 'Assets/游戏资源/远端版本.txt'
+REMOTE_COMMIT = 'a' * 40
 ERROR = ('Git 下载连接中断，无法连接服务器。请检查网络后点击“准备 / 重试”。' * 5
          + 'https://github.com/git-for-windows/git/releases/download/PortableGit.7z.exe')
 
@@ -134,7 +138,7 @@ class LayoutFixture:
             raise AssertionError('Real NativePanelHandle failed to construct fixture: ' + error)
         self.handle = handle
         self.panel = handle.widget
-        self.panel.run = Mock(name='no_worker_or_repo_operations')
+        self.panel.run = Mock(name='no_worker_or_repo_operations', side_effect=self.fixture_worker)
         self.panel.warn = Mock(side_effect=AssertionError('Unexpected modal in layout QA'))
         self.panel.timer.stop()
         self.force_viewport = force_viewport
@@ -168,6 +172,31 @@ class LayoutFixture:
         p.runtime_finished(0, QProcess.NormalExit)
         drain(self.app)
 
+    def fixture_worker(self, operation, args=None, callback=None, refresh=True):
+        if operation not in ('tree', 'workspace_tree'):
+            return
+        args = args or {}
+        side, path = args['side'], args.get('path', '')
+        paths = (FILE, READY_FILE) if side == 'local' else (REMOTE_FILE,)
+        prefix = path + '/' if path else ''
+        entries = {}
+        for candidate in paths:
+            if not candidate.startswith(prefix):
+                continue
+            name, separator, _ = candidate[len(prefix):].partition('/')
+            entries[name] = {'name': name, 'path': prefix + name,
+                             'kind': 'directory' if separator else 'file'}
+        if callback:
+            callback({'side': side, 'path': path, 'entries': list(entries.values()),
+                      'ref': 'origin/main' if side == 'remote' else '',
+                      'commit': REMOTE_COMMIT if side == 'remote' else ''})
+        QTimer.singleShot(0, self.panel.load_next_directory)
+
+    def change_item(self, path=FILE):
+        files = self.panel.files
+        return next((files.item(i) for i in range(files.count())
+                     if (files.item(i).data(Qt.UserRole) or {}).get('path') == path), None)
+
     def long_content(self):
         p = self.panel
         path = str(self.base / PROJECT)
@@ -177,11 +206,11 @@ class LayoutFixture:
         p.repositories.blockSignals(False)
         p.repo = path
         p.render({'root': path, 'branch': BRANCH, 'branches': [BRANCH, 'main'],
-                  'files': [{'status': ' M', 'path': FILE, 'old': '', 'conflict': False}],
+                  'files': [{'status': ' M', 'path': FILE, 'old': '', 'conflict': False},
+                            {'status': 'M ', 'path': READY_FILE, 'old': '', 'conflict': False}],
+                  'remoteTree': {'ref': 'origin/main', 'commit': REMOTE_COMMIT},
                   'ahead': 32, 'behind': 7, 'operations': [], 'remotes': 'origin https://github.com/fixture/game.git',
                   'stashes': [], 'upstream': 'origin/main', 'tags': []})
-        p.file_label.setText(FILE)
-        p.diff.setPlainText('diff --git a/Player.cs b/Player.cs\n@@ -1,3 +1,4 @@\n-旧的角色移动\n+修复角色移动\n+保留团队成员的场景修改\n' * 22)
         p.message.setText('修复角色跳跃并同步第一关场景')
         drain(self.app)
 
@@ -202,12 +231,13 @@ class LayoutFixture:
         p = self.panel
         widgets = {n: getattr(p, n, None) for n in (
             'repositories', 'branches', 'summary', 'runtime_label', 'runtime_box',
-            'header_bar', 'repo_bar', 'sync_bar', 'tabs', 'files', 'diff',
-            'message', 'commit_button', 'commit_actions', 'workspace_split', 'history_split',
+            'header_bar', 'repo_bar', 'sync_bar', 'tabs', 'files', 'remote_tree', 'local_tree',
+            'message', 'commit_button', 'commit_actions', 'workspace_split', 'directory_split', 'history_split',
             'status', 'environment_status')}
         geometry = {name: [self.rect(w).x(), self.rect(w).y(), w.width(), w.height()]
                     for name, w in widgets.items() if isinstance(w, QWidget)}
         dpr = self.window.devicePixelRatioF()
+        file_item = self.change_item()
         result = {'requestedLogical': self.requested,
                   'actualLogical': [self.window.width(), self.window.height()], 'dpr': dpr,
                   'physicalPixels': [round(self.window.width() * dpr), round(self.window.height() * dpr)],
@@ -223,15 +253,16 @@ class LayoutFixture:
                   'progressFontHeight': p.runtime_progress.fontMetrics().height(),
                   'progressAccessibleName': p.runtime_progress.accessibleName(),
                   'runtimeLabel': p.runtime_label.text(), 'runtimeTooltip': p.runtime_label.toolTip(),
-                  'fileTooltip': p.file_label.toolTip(),
+                  'fileTooltip': file_item.toolTip() if file_item else '',
                   'branchTooltip': getattr(p, 'branch_button', p.branches).toolTip(),
                   'repoTooltip': p.repositories.toolTip(),
                   'containsCommit': p.rect().contains(self.rect(p.commit_button)),
-                  'containsDiff': p.rect().contains(self.rect(p.diff)),
+                  'noInlineDiff': not any(child.isVisibleTo(p.changes_page)
+                                          for child in p.changes_page.findChildren(QPlainTextEdit)),
                   'splitters': [{'sizes': s.sizes(), 'childrenCollapsible': s.childrenCollapsible()} for s in p.findChildren(QSplitter)],
                   'sourceSha256': hashlib.sha256((self.package / 'ui/panel.py').read_bytes()).hexdigest()}
         result['visibleViewports'] = {}
-        for name in ('files', 'diff'):
+        for name in ('remote_tree', 'local_tree', 'files'):
             viewport = getattr(p, name).viewport()
             visible = self.visible_rect(viewport)
             result['visibleViewports'][name] = {'widgetSize': [viewport.width(), viewport.height()],
@@ -273,7 +304,7 @@ class LayoutFixture:
                     visible = visible_rect(button)
                     result['buttons'].append({'text': button.text(), 'size': [button.width(), button.height()],
                                               'visibleSize': [visible.width(), visible.height()],
-                                              'terminal': any(s in button.text() for s in ('返回', '关闭', '保存说明', '暂存勾选', '确认重排', '明白了'))})
+                                              'terminal': any(s in button.text() for s in ('返回', '关闭', '保存说明', '暂存勾选', '确认重排', '明白了', '加入'))})
                 result['contents'] = []
                 for area in dialog.findChildren(QAbstractScrollArea):
                     if not area.isVisibleTo(dialog): continue
@@ -324,14 +355,20 @@ class LayoutFixture:
                 ('image', lambda: p.image_dialog({'before': encoded, 'after': encoded})),
                 ('reorder', reorder)]
 
-    def open_and_close_menu(self, callback):
+    def open_and_close_menu(self, callback, trigger=None):
         failures = []
         captured = []
         def close_popup():
             menu = self.app.activePopupWidget()
             try:
                 if not isinstance(menu, QMenu): raise AssertionError('Expected a real offscreen QMenu')
-                captured.append(len(menu.actions()))
+                choices = [action for action in menu.actions() if action.isEnabled() and action.text()]
+                captured.extend(action.text() for action in choices)
+                if trigger:
+                    action = next((action for action in choices if trigger in action.text()), None)
+                    if action is None:
+                        raise AssertionError(f'Expected action {trigger!r} among {captured!r}')
+                    action.trigger()
             except Exception as error:
                 failures.append(error)
             finally:
@@ -340,7 +377,8 @@ class LayoutFixture:
         callback()
         drain(self.app)
         if failures: raise failures[0]
-        if not captured or not captured[0]: raise AssertionError('Empty or unopened menu')
+        if not captured: raise AssertionError('Empty or unopened menu')
+        return captured
 
     def close(self):
         if getattr(self, 'handle', None): self.handle.shutdown()
@@ -365,8 +403,12 @@ class PanelLayoutTests(unittest.TestCase):
         result = self.fixture.snapshot()
         self.assertEqual(result['actualLogical'], [1280, 720])
         self.assertTrue(result['containsCommit'])
-        self.assertTrue(result['containsDiff'])
-        self.assertGreaterEqual(self.panel.diff.height(), 160)
+        self.assertTrue(result['noInlineDiff'])
+        self.assertGreaterEqual(self.panel.files.height(), 160)
+        for item in result['visibleViewports'].values():
+            self.assertGreaterEqual(min(item['clippedVisibleSize']), 100)
+        self.assertGreater(self.panel.files.mapTo(self.panel, QPoint()).x(),
+                           self.panel.local_tree.mapTo(self.panel, QPoint()).x())
         self.assertLessEqual(self.panel.minimumSizeHint().width(), self.panel.width())
 
     def test_ready_runtime_is_compact_and_failure_remains_actionable(self):
@@ -388,22 +430,23 @@ class PanelLayoutTests(unittest.TestCase):
         self.assertTrue(failed['containsCommit'])
 
     def test_workspace_and_history_splitters_are_user_adjustable(self):
-        for index, name in enumerate(('workspace_split', 'history_split')):
+        self.fixture.long_content()
+        for index, name in ((0, 'workspace_split'), (0, 'directory_split'), (1, 'history_split')):
             self.panel.tabs.setCurrentIndex(index)
             drain(self.app)
             splitter = getattr(self.panel, name)
             self.assertFalse(splitter.childrenCollapsible())
             before = splitter.sizes()
-            splitter.setSizes([sum(before) // 2, sum(before) // 2])
+            splitter.setSizes([sum(before) // 2 - 12, sum(before) // 2 + 12])
             drain(self.app)
             self.assertTrue(all(value > 0 for value in splitter.sizes()))
             self.assertNotEqual(splitter.sizes(), before)
             from PySide6.QtTest import QTest
             handle=splitter.handle(1)
-            self.assertEqual(splitter.handleWidth(),8)
+            self.assertGreaterEqual(splitter.handleWidth(),6)
             self.assertTrue(handle.isVisible())
             start=handle.rect().center()
-            end=start+QPoint(18,0)
+            end = start + (QPoint(18, 0) if splitter.orientation() == Qt.Horizontal else QPoint(0, 18))
             before=splitter.sizes()
             QTest.mousePress(handle,Qt.MouseButton.LeftButton,pos=start)
             QTest.mouseMove(handle,end)
@@ -414,34 +457,82 @@ class PanelLayoutTests(unittest.TestCase):
 
     def test_long_file_and_branch_remain_available_as_tooltips(self):
         self.fixture.long_content()
-        self.assertIn(FILE, self.panel.file_label.toolTip())
+        self.assertIn(FILE, self.fixture.change_item().toolTip())
         self.assertIn(BRANCH, self.panel.branch_button.toolTip())
         self.assertIn(PROJECT, self.panel.repositories.toolTip())
         dynamic = '<tag>场景与队友&文件名称</tag>' * 12
-        for label in (self.panel.file_label, self.panel.summary, self.panel.runtime_label, self.panel.status):
+        for label in (self.panel.summary, self.panel.runtime_label, self.panel.status):
             label.setText(dynamic)
             self.assertEqual(label.textFormat(), Qt.PlainText)
             self.assertEqual(label.accessibleName(), dynamic)
             self.assertEqual(label.toolTip(), dynamic)
+
+    def test_change_selection_is_read_only_and_actions_are_contextual(self):
+        self.fixture.long_content()
+        p = self.panel
+        pending = self.fixture.change_item()
+        included = self.fixture.change_item(READY_FILE)
+        p.run.reset_mock()
+        p.files.setCurrentItem(pending)
+        p.files.setCurrentItem(included)
+        self.assertNotIn('diff', [call.args[0] for call in p.run.call_args_list])
+        self.assertTrue(self.fixture.snapshot()['noInlineDiff'])
+
+        def request(item):
+            return lambda: p.changes_menu(p.files.visualItemRect(item).center())
+
+        menu = self.fixture.open_and_close_menu(request(pending), '加入本次提交')
+        self.assertTrue(any('差异' in title for title in menu))
+        self.assertTrue(any('文件历史' in title for title in menu))
+        self.assertEqual(p.run.call_args.args[:2], ('stage', {'paths': [FILE]}))
+        self.fixture.open_and_close_menu(request(included), '移出本次提交')
+        self.assertEqual(p.run.call_args.args[:2], ('unstage', {'paths': [READY_FILE]}))
+        self.fixture.open_and_close_menu(request(pending), '查看未加入的差异')
+        self.assertEqual(p.run.call_args.args[0], 'diff')
+        self.assertEqual(p.run.call_args.args[1]['path'], FILE)
+
+    def test_expanding_directories_reads_local_and_pinned_remote_independently(self):
+        self.fixture.long_content()
+        p = self.panel
+        for side in ('local', 'remote'):
+            for directory in ('Assets', 'Assets/游戏资源'):
+                item = p.directory_item(side, directory)
+                self.assertIsNotNone(item, (side, directory))
+                item.setExpanded(True)
+                drain(self.app)
+        self.assertIsNotNone(p.directory_item('local', READY_FILE))
+        self.assertIsNone(p.directory_item('remote', READY_FILE))
+        remote_asset = p.directory_item('remote', REMOTE_FILE)
+        self.assertIsNotNone(remote_asset)
+        self.assertIsNone(p.directory_item('local', REMOTE_FILE))
+        remote_reads = [call.args[1] for call in p.run.call_args_list
+                        if call.args[0] in ('tree', 'workspace_tree') and call.args[1]['side'] == 'remote']
+        self.assertTrue(any(read['path'] == 'Assets/游戏资源' for read in remote_reads))
+        self.assertTrue(all(read.get('commit') == REMOTE_COMMIT for read in remote_reads))
+        menu = self.fixture.open_and_close_menu(lambda: p.tree_menu(
+            'remote', p.remote_tree.visualItemRect(remote_asset).center()), '与本地提交比较')
+        self.assertFalse(any('加入本次提交' in title for title in menu))
+        self.assertEqual(p.run.call_args.args[:2], ('workspace_diff', {
+            'path': REMOTE_FILE, 'commit': REMOTE_COMMIT}))
 
     def test_secondary_panels_fit_and_return_reusable_widgets(self):
         self.fixture.long_content()
         p = self.panel
         p.description = '队友仍需继续编辑的提交详细说明'
         p.amend.setChecked(True)
-        p.staged.setChecked(True)
         p.filter.setText('超长')
-        p.files.setCurrentRow(0)
-        p.files.item(0).setSelected(True)
-        p.diff.verticalScrollBar().setValue(40)
+        item = self.fixture.change_item()
+        p.files.setCurrentItem(item)
+        item.setSelected(True)
+        p.files.verticalScrollBar().setValue(40)
         p.workspace_split.setSizes([340, 500])
         drain(self.app)
         def draft_state():
             return {'message': p.message.text(), 'description': p.description,
-                    'amend': p.amend.isChecked(), 'staged': p.staged.isChecked(),
+                    'amend': p.amend.isChecked(),
                     'filter': p.filter.text(), 'selected': [i.text() for i in p.files.selectedItems()],
-                    'current': p.files.currentRow(), 'diff': p.diff.toPlainText(),
-                    'scroll': p.diff.verticalScrollBar().value(), 'split': p.workspace_split.sizes()}
+                    'current': p.files.currentRow(),
+                    'scroll': p.files.verticalScrollBar().value(), 'split': p.workspace_split.sizes()}
         before = draft_state()
         callbacks = (self.panel.project_panel, self.panel.branch_panel,
                          self.panel.sync_panel, self.panel.tools_panel,
@@ -468,7 +559,7 @@ class PanelLayoutTests(unittest.TestCase):
         self.assertIs(self.panel.log.parentWidget(), self.panel)
         self.assertTrue(self.panel.log.isHidden())
 
-    def test_qa_forced_small_viewport_keeps_lists_diff_and_commit_visible(self):
+    def test_qa_forced_small_viewport_keeps_workspace_and_commit_visible(self):
         self.fixture.close()
         self.fixture = LayoutFixture(width=853, height=480, force_viewport=True)
         self.panel = self.fixture.panel
@@ -478,9 +569,10 @@ class PanelLayoutTests(unittest.TestCase):
             result = self.fixture.snapshot()
             with self.subTest(ready=ready):
                 self.assertEqual(result['actualLogical'], [853, 480])
-                for item in result['visibleViewports'].values():
+                for name, item in result['visibleViewports'].items():
                     self.assertGreaterEqual(item['clippedVisibleSize'][0], 80)
-                    self.assertGreaterEqual(item['clippedVisibleSize'][1], 80)
+                    self.assertGreaterEqual(item['clippedVisibleSize'][1],
+                                            80 if name == 'files' else 36, name)
                 self.assertEqual(result['commitVisibleSize'],
                                  [self.panel.commit_button.width(), self.panel.commit_button.height()])
                 self.assertEqual(result['environmentVisibleSize'],
@@ -518,14 +610,19 @@ class PanelLayoutTests(unittest.TestCase):
                         layout = QWidget.layout(ancestor)
                         if layout: self.assertNotEqual(layout.sizeConstraint(), QLayout.SetNoConstraint)
                         ancestor = ancestor.parentWidget()
-                    for item in result['visibleViewports'].values():
-                        self.assertGreaterEqual(min(item['clippedVisibleSize']), 80)
+                    for name, item in result['visibleViewports'].items():
+                        self.assertGreaterEqual(item['clippedVisibleSize'][0], 80)
+                        self.assertGreaterEqual(item['clippedVisibleSize'][1],
+                                                80 if name == 'files' else 36, name)
                     self.assertEqual(result['commitVisibleSize'], [self.panel.commit_button.width(), self.panel.commit_button.height()])
                     self.assertEqual(result['environmentVisibleSize'], [self.panel.environment_status.width(), self.panel.environment_status.height()])
             if first == (853, 480): self.fixture.close()
 
     def test_secondary_dialogs_do_not_accumulate_over_six_cycles(self):
         p = self.panel
+        self.fixture.long_content()
+        item = self.fixture.change_item()
+        p.files.setCurrentItem(item)
         before = len(p.findChildren(QDialog))
         menus_before = len(p.findChildren(QMenu))
         callbacks = (p.project_panel, p.branch_panel, p.sync_panel, p.tools_panel,
@@ -534,7 +631,8 @@ class PanelLayoutTests(unittest.TestCase):
         for cycle in range(6):
             for callback in callbacks:
                 self.fixture.modal_snapshot(callback)
-            for callback in (lambda: p.menu([('测试菜单操作', lambda: None)]), p.diff_menu, p.commit_menu):
+            for callback in (lambda: p.menu([('测试菜单操作', lambda: None)]),
+                             lambda: p.changes_menu(p.files.visualItemRect(item).center()), p.commit_menu):
                 self.fixture.open_and_close_menu(callback)
             with self.subTest(cycle=cycle):
                 drain(self.app)

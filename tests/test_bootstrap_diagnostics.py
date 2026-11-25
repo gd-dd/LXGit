@@ -112,7 +112,7 @@ class BootstrapDiagnosticsTests(unittest.TestCase):
         if detail_button:
             button = next(b for b in panel.runtime_box.findChildren(QPushButton) if b.text() == '详情')
             self.assertTrue(button.isVisible()); button.click()
-            self.panel.show_text.assert_called_with(panel.runtime_label.text())
+            self.assertIn(panel.runtime_label.text(),self.panel.show_text.call_args.args[0])
 
     def test_primary_cleanup_attribute_survives_worker_json_and_panel_details(self):
         error = ValueError('Git 已解压并验证，但无法切换运行目录。')

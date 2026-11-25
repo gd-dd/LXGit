@@ -63,6 +63,64 @@ class GitIntegration(unittest.TestCase):
         self.write('folder/中文.txt','new');self.assertIn('folder/中文.txt',[f['path'] for f in self.call('snapshot')['files']])
         self.g.run('mv','初始.txt','改名.txt');entry=next(f for f in self.call('snapshot')['files'] if f['path']=='改名.txt');self.assertEqual(entry['old'],'初始.txt')
 
+    def test_workspace_local_tree_is_shallow_and_hides_ignored_entries(self):
+        self.write('.gitignore','生成缓存/\n初始.txt\n')
+        self.write('生成缓存/内部文件.txt','runtime')
+        self.write('目录/中文[方].txt','local')
+        self.write('目录/下级/子文件.txt','nested')
+        root=self.call('tree',side='local',path='')
+        self.assertEqual([{key:item[key] for key in ('name','path','kind')} for item in root['entries']],[
+            {'name':'目录','path':'目录','kind':'directory'},
+            {'name':'.gitignore','path':'.gitignore','kind':'file'},
+            {'name':'初始.txt','path':'初始.txt','kind':'file'},
+        ])
+        folder=self.call('workspace_tree',side='local',path='目录')
+        self.assertEqual([(item['name'],item['kind']) for item in folder['entries']],
+                         [('下级','directory'),('中文[方].txt','file')])
+        for path in ('../outside','.git','目录/../../outside',r'C:\outside','/outside'):
+            with self.assertRaises(GitError):
+                self.call('tree',side='local',path=path)
+
+    def test_workspace_remote_tree_pins_cached_branch_without_touching_checkout(self):
+        self.assertEqual(self.call('tree',side='remote')['entries'],[])
+        self.assertEqual(self.call('snapshot')['remoteTree'],{'ref':'','commit':''})
+        self.write('目录/原有.txt','initial nested file\n')
+        self.call('stage',paths=['目录/原有.txt'])
+        self.call('commit',message='添加原有文件')
+        remote=self.root/'remote.git'
+        Git().run('init','--bare','--initial-branch=main',str(remote))
+        self.call('remote',url=str(remote))
+        self.call('push')
+        original=self.call('snapshot')['remoteTree']
+        self.assertEqual(original,{'ref':'origin/main','commit':self.g.ref('HEAD')})
+
+        clone=self.root/'clone'
+        self.g.run('clone','--',str(remote),str(clone))
+        other=Git(str(clone))
+        other.run('config','user.name','Remote User')
+        other.run('config','user.email','remote@example.invalid')
+        (clone/'目录/新增[图].txt').write_text('remote changes','utf-8')
+        other.run('add','.')
+        other.run('commit','-m','添加远端文件')
+        other.run('push')
+        self.call('fetch')
+        newest=self.call('snapshot')['remoteTree']
+        self.assertNotEqual(newest['commit'],original['commit'])
+        self.call('remote',url=str(self.root/'offline.git'))
+
+        self.assertEqual([entry['name'] for entry in self.call('tree',side='remote')['entries']],
+                         ['目录','初始.txt'])
+        folder=self.call('tree',side='remote',path='目录',commit=newest['commit'])
+        self.assertEqual({entry['name'] for entry in folder['entries']},{'新增[图].txt','原有.txt'})
+        older=self.call('tree',side='remote',path='目录',commit=original['commit'])
+        self.assertEqual([entry['name'] for entry in older['entries']],['原有.txt'])
+        self.assertIn('添加远端文件',self.call('file_history',path='目录/新增[图].txt',commit=newest['commit']))
+        self.assertIn('+remote changes',self.call('workspace_diff',path='目录/新增[图].txt',commit=newest['commit']))
+        self.assertEqual(self.g.ref('HEAD'),original['commit'])
+        self.assertFalse((self.repo/'目录/新增[图].txt').exists())
+        with self.assertRaises(GitError):
+            self.call('tree',side='remote',commit='--all')
+
     def test_compare_file_history_and_signing_settings(self):
         self.call('branch_create',name='feature');self.write('feature','f');self.call('stage',paths=['feature']);self.call('commit',message='feature')
         self.assertIn('feature',self.call('compare',ref='main'));self.assertIn('feature',self.call('file_history',path='feature'))

@@ -139,6 +139,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b'official fixture')
         self.assertEqual(events[-1][1:], (16, 16))
 
+    def test_download_resumes_at_the_last_received_byte(self):
+        body=b'0123456789'
+        first=Response(body[:4])
+        resumed=Response(body[4:])
+        resumed.status=206
+        resumed.headers={'Content-Range':'bytes 4-9/10'}
+        opener=Mock()
+        opener.open.side_effect=[first,resumed]
+        path=self.root/'resumed.exe'
+        spec=dict(rt.SPEC,size=len(body),sha256=hashlib.sha256(body).hexdigest())
+        events=[]
+        with patch.object(rt,'SPEC',spec),patch.object(rt.urllib.request,'build_opener',return_value=opener):
+            rt.download(path,self.cancel,lambda *event:events.append(event))
+        self.assertEqual(path.read_bytes(),body)
+        self.assertEqual(opener.open.call_args.args[0].get_header('Range'),'bytes=4-')
+        self.assertTrue(any('重新连接' in phase and done==4 for phase,done,_ in events))
+
     def test_download_rejects_truncated_oversized_and_same_size_tampering(self):
         for body in [b'abc', b'abcdef', b'abXd']:
             with self.subTest(body=body), self.assertRaises(ValueError):

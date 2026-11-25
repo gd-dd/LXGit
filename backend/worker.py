@@ -2,7 +2,7 @@
 import base64
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import shlex
@@ -22,6 +22,19 @@ except ImportError:
 
 class GitError(Exception):
     pass
+
+
+LOCAL_OBJECTS = {'GIT_NO_LAZY_FETCH': '1'}
+LITERAL_LOCAL_OBJECTS = {**LOCAL_OBJECTS, 'GIT_LITERAL_PATHSPECS': '1'}
+
+
+def workspace_path(path, *, allow_root=False):
+    if path == '' and allow_root:
+        return path
+    if (not isinstance(path, str) or '\x00' in path or '\\' in path or PureWindowsPath(path).drive
+            or any(part.casefold() in ('', '.', '..', '.git') for part in path.split('/'))):
+        raise GitError('目录或文件路径无效。')
+    return path
 
 
 def find_git(explicit=''):
@@ -83,6 +96,30 @@ class Git:
         if name.startswith('-'): raise GitError('分支名不能以减号开头。')
         self.run('check-ref-format','--branch',name)
         return name
+    def remote_tree(self, branch=None):
+        upstream=self.run('rev-parse','--symbolic-full-name','@{upstream}',check=False,extra_env=LOCAL_OBJECTS)
+        if branch is None:
+            branch=self.run('symbolic-ref','--short','HEAD',check=False)
+        remotes=self.run('remote').splitlines()
+        preferred='origin' if 'origin' in remotes else remotes[0] if len(remotes)==1 else ''
+        candidates=[upstream] if upstream.startswith('refs/remotes/') else []
+        if preferred:
+            if branch:
+                candidates.append(f'refs/remotes/{preferred}/{branch}')
+            candidates.append(f'refs/remotes/{preferred}/HEAD')
+        for ref in dict.fromkeys(candidates):
+            commit=self.run('rev-parse','--verify',ref+'^{commit}',check=False,extra_env=LOCAL_OBJECTS)
+            if commit:
+                actual=self.run('symbolic-ref',ref,check=False) or ref
+                return {'ref':actual.removeprefix('refs/remotes/'),'commit':commit}
+        return {'ref':'','commit':''}
+    def local_commit(self, commit):
+        if not isinstance(commit,str) or not re.fullmatch(r'(?:[a-f0-9]{40}|[a-f0-9]{64})',commit):
+            raise GitError('远端版本无效，请刷新目录。')
+        verified=self.run('rev-parse','--verify',commit+'^{commit}',check=False,extra_env=LOCAL_OBJECTS)
+        if verified!=commit:
+            raise GitError('本地缺少此远端版本，请检查远端更新。')
+        return verified
     def snapshot(self):
         root=self.run('rev-parse','--show-toplevel')
         raw=self.run('status','--porcelain=v1','--untracked-files=all','-z',raw=True).decode('utf-8','replace').split('\0')
@@ -94,7 +131,7 @@ class Git:
             if 'R' in status or 'C' in status:
                 old=raw[i];i+=1
             files.append({'status':status,'path':path,'old':old,'conflict':status in ('DD','AU','UD','UA','DU','AA','UU')})
-        branch=self.run('symbolic-ref','--short','HEAD',check=False) or '分离头指针'
+        branch=self.run('symbolic-ref','--short','HEAD',check=False)
         upstream=self.run('rev-parse','--abbrev-ref','--symbolic-full-name','@{upstream}',check=False)
         counts=self.run('rev-list','--left-right','--count','HEAD...@{upstream}',check=False).split()
         branches=self.run('for-each-ref','--format=%(refname:short)','refs/heads','refs/remotes').splitlines()
@@ -103,10 +140,76 @@ class Git:
             q=Path(self.run('rev-parse','--git-path',path))
             if not q.is_absolute(): q=Path(self.repo)/q
             if q.exists() and name not in operations:operations.append(name)
-        return dict(root=root,branch=branch,files=files,branches=branches,upstream=upstream,
+        return dict(root=root,branch=branch or '分离头指针',files=files,branches=branches,upstream=upstream,
             ahead=int(counts[0]) if counts else 0,behind=int(counts[1]) if counts else 0,
             operations=operations,remotes=self.run('remote','-v'),tags=self.run('tag').splitlines(),
-            stashes=self.run('stash','list','--format=%gd%x09%gs').splitlines())
+            stashes=self.run('stash','list','--format=%gd%x09%gs').splitlines(),remoteTree=self.remote_tree(branch))
+
+
+def local_workspace_entries(g,path):
+    root=Path(g.run('rev-parse','--show-toplevel')).resolve()
+    folder=root/path
+    if folder.resolve()!=folder:
+        raise GitError('目录包含链接或重解析点，请在资源管理器中查看。')
+    if not folder.is_dir():
+        raise GitError('本地目录不存在，请刷新目录。')
+    entries=[]
+    with os.scandir(folder) as children:
+        for child in children:
+            if child.name.casefold()=='.git':
+                continue
+            rel=f'{path}/{child.name}' if path else child.name
+            directory=child.is_dir(follow_symlinks=False)
+            junction=directory and hasattr(Path(child.path),'is_junction') and Path(child.path).is_junction()
+            link=child.is_symlink() or junction
+            nested=directory and not link and (Path(child.path)/'.git').exists()
+            kind='directory' if directory and not link and not nested else 'file'
+            entry={'name':child.name,'path':rel,'kind':kind}
+            if link or nested:
+                entry['type']='link' if link else 'submodule'
+            entries.append(entry)
+    if not entries:
+        return entries
+    names='\0'.join(entry['path'] for entry in entries)+'\0'
+    ignored=g.run('-C',root,'check-ignore','-z','--stdin',input=names,check=False,raw=True)
+    excluded=set(ignored.decode('utf-8','replace').split('\0'))
+    return [entry for entry in entries if entry['path'] not in excluded]
+
+
+def remote_workspace_entries(g,path,commit):
+    tree=commit+':'+path if path else commit
+    raw=g.run('ls-tree','-z',tree,raw=True,extra_env=LOCAL_OBJECTS)
+    entries=[]
+    for line in raw.decode('utf-8','replace').split('\0'):
+        if not line:
+            continue
+        metadata,name=line.split('\t',1)
+        mode=metadata.split(' ',1)[0]
+        rel=f'{path}/{name}' if path else name
+        entry={'name':name,'path':rel,'kind':'directory' if mode=='040000' else 'file'}
+        if mode in ('120000','160000'):
+            entry['type']='link' if mode=='120000' else 'submodule'
+        entries.append(entry)
+    return entries
+
+
+def workspace_tree(g,args):
+    path=workspace_path(args.get('path',''),allow_root=True)
+    side=args.get('side')
+    identity={'ref':'','commit':''}
+    if side=='local':
+        entries=local_workspace_entries(g,path)
+    elif side=='remote':
+        identity=g.remote_tree()
+        if args.get('commit'):
+            commit=g.local_commit(args['commit'])
+            if identity['commit']!=commit:
+                identity={'ref':'','commit':commit}
+        entries=remote_workspace_entries(g,path,identity['commit']) if identity['commit'] else []
+    else:
+        raise GitError('请选择本地或远端目录。')
+    entries.sort(key=lambda entry:(entry['kind']!='directory',entry['name'].casefold(),entry['name']))
+    return dict(entries=entries,path=path,side=side,**identity)
 
 
 def github(g,endpoint,method='GET',body=None):
@@ -172,6 +275,14 @@ def dispatch(req):
         if owner and not re.fullmatch(r'[\w.-]+',owner):raise GitError('组织名称无效。')
         return github(g,'/orgs/'+owner+'/repos' if owner else '/user/repos','POST',{'name':name,'private':a.get('private',True),'description':a.get('description',''),'auto_init':False})
     if op=='snapshot':return g.snapshot()
+    if op in ('tree','workspace_tree'):return workspace_tree(g,a)
+    if op=='workspace_diff':
+        commit=g.local_commit(a.get('commit'))
+        path=workspace_path(a.get('path'))
+        head=g.run('rev-parse','--verify','HEAD',check=False,extra_env=LOCAL_OBJECTS)
+        if not head:raise GitError('本地还没有提交可比较。')
+        return g.run('diff','--no-ext-diff','--no-textconv',head,commit,'--',path,raw=True,
+                     extra_env=LITERAL_LOCAL_OBJECTS).decode('utf-8','replace')[:2000000]
     if op=='history':
         if not g.run('rev-parse','--verify','HEAD',check=False):return []
         data=g.run('log','-200','--date=iso-strict','--format=%H%x00%h%x00%an%x00%ad%x00%s%x00%d%x1e')
@@ -216,11 +327,14 @@ def dispatch(req):
             return data.decode('utf-8','replace')
         return g.run('diff',*flags,'--no-ext-diff','--no-textconv','--',path,raw=True).decode('utf-8','replace')[:2000000]
     if op in ('stage','unstage'):
-        paths=[g.path(p) for p in a['paths']]
+        paths=[g.path(workspace_path(p)) for p in a['paths']]
         if not paths:raise GitError('请先选择文件。')
-        if op=='stage':return g.run('add','--',*paths)
-        if g.run('rev-parse','--verify','HEAD',check=False):return g.run('restore','--staged','--',*paths)
-        return g.run('rm','--cached','--',*paths)
+        literal=['--pathspec-from-file=-','--pathspec-file-nul']
+        selection='\0'.join(paths)+'\0'
+        if op=='stage':return g.run('add',*literal,input=selection)
+        if g.run('rev-parse','--verify','HEAD',check=False):
+            return g.run('restore','--staged',*literal,input=selection)
+        return g.run('rm','--cached',*literal,input=selection)
     if op=='apply_patch':return g.run('apply','--cached','--recount','--whitespace=nowarn','-',input=a['patch'])
     if op=='commit':
         if not a['message'].strip():raise GitError('请填写提交说明。')
@@ -304,7 +418,13 @@ def dispatch(req):
     if op=='github_url':return 'https://'+g.host+'/'+remote_repo(g)
     if op=='compare':
         base=g.ref(a['ref']);return g.run('log','--oneline',base+'..HEAD')+'\n\n'+g.run('diff','--stat','--patch','--no-ext-diff','--no-textconv',base+'...HEAD')[:2000000]
-    if op=='file_history':return g.run('log','-100','--follow','--format=%h %ad %an %s','--date=short','--',g.path(a['path']))
+    if op=='file_history':
+        if a.get('commit'):
+            commit=g.local_commit(a['commit'])
+            path=workspace_path(a['path'])
+            return g.run('log','-100','--follow','--format=%h %ad %an %s','--date=short',commit,'--',path,
+                         extra_env=LITERAL_LOCAL_OBJECTS)
+        return g.run('log','-100','--follow','--format=%h %ad %an %s','--date=short','--',g.path(a['path']))
     if op=='signing':
         enabled=bool(a.get('enabled'));key=a.get('key','').strip()
         if enabled and not key:raise GitError('请填写 GPG 签名密钥 ID。')

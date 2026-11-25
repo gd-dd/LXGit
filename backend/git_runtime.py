@@ -145,18 +145,67 @@ def validate_url(url):
     if u.scheme!='https' or u.hostname not in ('github.com','release-assets.githubusercontent.com','objects.githubusercontent.com') or u.username or u.password:
         raise ValueError('Git 下载跳转来源不受信任。')
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_TIMEOUT = 12
+DOWNLOAD_LIMIT = 12 * 60
+
+
 def _download(path,cancel,progress):
-    validate_url(SPEC['url']);op=urllib.request.build_opener(SecureRedirect())
-    h=hashlib.sha256();total=0
-    with op.open(urllib.request.Request(SPEC['url'],headers={'User-Agent':'LXGit-PrivateGit'}),timeout=15) as response,path.open('wb') as f:
-        validate_url(response.url)
-        while True:
-            check_cancel(cancel);b=response.read(256*1024)
-            if not b:break
-            total+=len(b)
-            if total>SPEC['size']:raise ValueError('Git 下载大小超过预期。')
-            h.update(b);f.write(b);progress('下载 Git',total,SPEC['size'])
-    if total!=SPEC['size'] or h.hexdigest()!=SPEC['sha256']:raise ValueError('Git 下载不完整或 SHA-256 校验失败，请重试。')
+    validate_url(SPEC['url'])
+    opener=urllib.request.build_opener(SecureRedirect())
+    size=SPEC['size']
+    deadline=time.monotonic()+DOWNLOAD_LIMIT
+    for attempt in range(1,DOWNLOAD_ATTEMPTS+1):
+        check_cancel(cancel)
+        total=path.stat().st_size if path.is_file() else 0
+        if total==size:
+            break
+        headers={'User-Agent':'LXGit-PrivateGit'}
+        if total:
+            headers['Range']=f'bytes={total}-'
+        phase='连接 GitHub…' if attempt==1 else f'重新连接 GitHub（第 {attempt}/{DOWNLOAD_ATTEMPTS} 次）…'
+        progress(phase,total,size)
+        try:
+            request=urllib.request.Request(SPEC['url'],headers=headers)
+            with opener.open(request,timeout=DOWNLOAD_TIMEOUT) as response:
+                validate_url(response.url)
+                resumed=getattr(response,'status',200)==206
+                if resumed:
+                    expected=f'bytes {total}-{size-1}/{size}'
+                    if not total or response.headers.get('Content-Range')!=expected:
+                        raise ValueError('GitHub 返回的续传范围无效，请重试。')
+                else:
+                    total=0
+                read=getattr(response,'read1',response.read)
+                with path.open('ab' if resumed else 'wb') as stream:
+                    progress('下载 Git',total,size)
+                    while total<size:
+                        check_cancel(cancel)
+                        if time.monotonic()>=deadline:
+                            raise ValueError('Git 下载已超过 12 分钟。可以换个网络后重试，或选择本机已有的 Git。')
+                        block=read(256*1024)
+                        if not block:
+                            raise http.client.IncompleteRead(b'',size-total)
+                        total+=len(block)
+                        if total>size:
+                            raise ValueError('Git 下载大小超过预期。')
+                        stream.write(block)
+                        progress('下载 Git',total,size)
+                    check_cancel(cancel)
+                    if read(1):
+                        raise ValueError('Git 下载大小超过预期。')
+            break
+        except (OSError,http.client.HTTPException) as error:
+            check_cancel(cancel)
+            status=getattr(error,'code',None)
+            if (attempt==DOWNLOAD_ATTEMPTS or time.monotonic()>=deadline
+                    or getattr(error,'errno',None) in (errno.ENOSPC,errno.EACCES,errno.EPERM)
+                    or (status is not None and status not in (408,429,500,502,503,504))):
+                raise
+    check_cancel(cancel)
+    if not path.is_file() or path.stat().st_size!=size or digest(path)!=SPEC['sha256']:
+        raise ValueError('Git 下载不完整或 SHA-256 校验失败，请重试。')
+
 
 def download(path,cancel,progress):
     try:_download(path,cancel,progress)
@@ -164,7 +213,8 @@ def download(path,cancel,progress):
         check_cancel(cancel)
         if isinstance(error,OSError) and error.errno in (errno.ENOSPC,errno.EACCES,errno.EPERM):
             raise ValueError('无法写入 Git 临时文件，请检查工具目录权限和磁盘空间后重试。') from error
-        raise ValueError('Git 下载连接中断或无法连接服务器，请检查网络后点击“准备 / 重试”。已下载的临时文件不会作为可用 Git。') from error
+        raise ValueError('连接 GitHub 失败或下载多次中断。请检查网络后点击“准备 / 重试”，或选择已有 Git。') from error
+
 
 def signature(path):
     # Literal path is supplied via environment, never interpolated into PowerShell code.

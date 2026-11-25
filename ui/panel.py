@@ -1,14 +1,15 @@
 """Tool-owned native QWidget, host API 1. No host-global state changes."""
 import json
 import base64
+import time
 from .runtime_paths import runtime_root, no_links
 from pathlib import Path
-from PySide6.QtCore import Qt,QProcess,QTimer,QUrl,QProcessEnvironment,QSize
+from PySide6.QtCore import Qt,QProcess,QTimer,QUrl,QProcessEnvironment,QSize,QItemSelectionModel
 from PySide6.QtGui import QDesktopServices,QPixmap,QFont,QSyntaxHighlighter,QTextCharFormat,QColor
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,QLineEdit,
     QTextEdit,QPlainTextEdit,QListWidget,QListWidgetItem,QSplitter,QTabWidget,QFileDialog,QInputDialog,
     QMessageBox,QMenu,QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QProgressBar,
-    QSizePolicy,QScrollArea,QGridLayout)
+    QSizePolicy,QScrollArea,QGridLayout,QTreeWidget,QTreeWidgetItem,QStyle,QApplication)
 
 ANIMATION_TOOL='repo-1433389279'
 
@@ -20,7 +21,7 @@ QWidget#LXGit QPushButton {background:#ffffff; color:#2d432d; border:1px solid #
 QWidget#LXGit QPushButton:hover {background:#eaf4dc; border-color:#8dbb43;}
 QWidget#LXGit QPushButton:disabled {color:#83907c; background:#edf1e8;}
 QWidget#LXGit QPushButton#primary {background:#91bd45; color:#172810; font-weight:bold;}
-QWidget#LXGit QLineEdit, QWidget#LXGit QPlainTextEdit, QWidget#LXGit QTextEdit, QWidget#LXGit QListWidget, QWidget#LXGit QComboBox {background:#ffffff; color:#243227; border:1px solid #d5e1ca; border-radius:5px; padding:6px; selection-background-color:#d8ebbb; selection-color:#243227;}
+QWidget#LXGit QLineEdit, QWidget#LXGit QPlainTextEdit, QWidget#LXGit QTextEdit, QWidget#LXGit QListWidget, QWidget#LXGit QTreeWidget, QWidget#LXGit QComboBox {background:#ffffff; color:#243227; border:1px solid #d5e1ca; border-radius:5px; padding:6px; selection-background-color:#d8ebbb; selection-color:#243227;}
 QWidget#LXGit QTabWidget::pane {border:1px solid #d5e1ca;}
 QWidget#LXGit QTabBar::tab {background:#edf3e6; color:#53644a; padding:7px 16px;}
 QWidget#LXGit QTabBar::tab:selected {color:#365c19; background:#deedc8;}
@@ -31,7 +32,6 @@ QWidget#LXGit QMenu::item:selected {background:#deedc8; color:#243227;}
 QWidget#LXGit QAbstractItemView::item:selected {background:#deedc8; color:#243227;}
 QWidget#LXGit QLineEdit:focus, QWidget#LXGit QPlainTextEdit:focus {border-color:#8dbb43;}
 '''
-STATUS={'??':'新文件',' M':'已修改','M ':'已暂存','MM':'暂存后又修改','A ':'新增已暂存',' D':'已删除','D ':'删除已暂存','R ':'已重命名','UU':'内容冲突','AA':'双方新增','DU':'一方删除','UD':'一方删除'}
 class ElidedLabel(QLabel):
     """Long project paths/diagnostics never set the workspace minimum width."""
     def __init__(self,text='',parent=None):
@@ -73,6 +73,9 @@ class Panel(QWidget):
         for p in self.settings.get('repositories',[]):
             self.repositories.addItem(Path(p).name,p);self.repositories.setItemData(self.repositories.count()-1,p,Qt.ToolTipRole)
         bar.addWidget(self.repositories,1)
+        self.change_files={};self.change_paths={}
+        self.refresh_button=self.button(bar,'刷新',self.refresh_workspace)
+        self.refresh_button.setToolTip('刷新本地改动和已获取的远端目录')
         self.project_button=self.button(bar,'项目',self.project_panel)
         self.branch_button=self.button(bar,'分支',self.branch_panel)
         self.sync_button=self.button(bar,'同步',self.sync_panel)
@@ -84,45 +87,92 @@ class Panel(QWidget):
         self.runtime_label=ElidedLabel('Git：正在检查工具运行环境…');runtimebar.addWidget(self.runtime_label,1)
         self.runtime_progress=QProgressBar();self.runtime_progress.setTextVisible(False);self.runtime_progress.setAccessibleName('Git 准备进度');self.runtime_progress.setMinimumWidth(60);self.runtime_progress.setMaximumWidth(150);runtimebar.addWidget(self.runtime_progress)
         self.runtime_retry=self.button(runtimebar,'重试',self.prepare_git);self.runtime_cancel=self.button(runtimebar,'取消',self.cancel_git);self.runtime_cancel.setEnabled(False)
-        self.button(runtimebar,'详情',lambda:self.show_text(self.runtime_label.text()));root.addWidget(self.runtime_box)
+        self.runtime_use_existing=self.button(runtimebar,'已有 Git…',self.choose_git)
+        self.button(runtimebar,'详情',self.runtime_details);root.addWidget(self.runtime_box)
+        self.runtime_timer=QTimer(self);self.runtime_timer.setInterval(1000)
+        self.runtime_timer.timeout.connect(self.update_runtime_progress)
+        self.runtime_phase='';self.runtime_done=self.runtime_total=0;self.runtime_since=time.monotonic()
+        self.runtime_history=[]
         self.operation=ElidedLabel();self.operation.hide();root.addWidget(self.operation)
         self.tabs=QTabWidget();root.addWidget(self.tabs,1)
         changes=QWidget();cl=QVBoxLayout(changes);cl.setContentsMargins(6,6,6,6);cl.setSpacing(6)
         self.workspace_split=QSplitter();split=self.workspace_split;split.setChildrenCollapsible(False);split.setHandleWidth(8);cl.addWidget(split,1)
-        left=QWidget();left.setMinimumWidth(170);ll=QVBoxLayout(left);ll.setContentsMargins(0,0,0,0);ll.setSpacing(5)
-        filebar=QHBoxLayout();filebar.setSpacing(4);self.filter=QLineEdit();self.filter.setMinimumWidth(0);self.filter.setPlaceholderText('搜索改动…');filebar.addWidget(self.filter,1);self.button(filebar,'文件…',self.changes_menu);ll.addLayout(filebar)
-        self.files=QListWidget();self.files.setMinimumSize(0,100);self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);self.files.setTextElideMode(Qt.ElideMiddle);self.files.setSelectionMode(QAbstractItemView.ExtendedSelection);ll.addWidget(self.files,1)
-        self.files_tools=QWidget();controls=QHBoxLayout(self.files_tools);controls.setContentsMargins(0,0,0,0);controls.setSpacing(4)
-        self.button(controls,'选入',lambda:self.stage(False)).setToolTip('将选中文件选入本次版本（暂存）')
-        self.button(controls,'移出',lambda:self.stage(True)).setToolTip('将选中文件移出本次版本（取消暂存）')
-        self.files.setContextMenuPolicy(Qt.CustomContextMenu);self.files.customContextMenuRequested.connect(lambda _:self.changes_menu());ll.addWidget(self.files_tools);split.addWidget(left)
-        right=QWidget();right.setMinimumWidth(210);rl=QVBoxLayout(right);rl.setContentsMargins(0,0,0,0);rl.setSpacing(5)
-        diffbar=QHBoxLayout();self.file_label=ElidedLabel('选择文件查看差异');diffbar.addWidget(self.file_label,1)
-        self.staged=QCheckBox('只看选入本次版本的改动',self);self.staged.hide()
-        self.button(diffbar,'差异…',self.diff_menu);rl.addLayout(diffbar)
-        self.diff=QPlainTextEdit();self.diff.setMinimumSize(0,100);self.diff.setReadOnly(True);self.diff.setFont(QFont('Consolas',11));self.diff.setStyleSheet('font-family:Consolas,"Microsoft YaHei UI";font-size:14px;');self.colors=DiffColors(self.diff.document());rl.addWidget(self.diff,1)
-        split.addWidget(right);split.setStretchFactor(0,3);split.setStretchFactor(1,7);split.setSizes([280,650])
-        commitbar=QHBoxLayout();commitbar.setSpacing(6);self.commit_actions=commitbar
-        self.message=QLineEdit();self.message.setMinimumWidth(60);self.message.setPlaceholderText('这次做了什么？');self.message.setToolTip('填写这次修改的说明，例如：修复角色跳跃、完成第一关场景');commitbar.addWidget(self.message,1)
+        self.directory_split=QSplitter(Qt.Vertical)
+        self.directory_split.setChildrenCollapsible(False)
+        self.directory_split.setHandleWidth(6)
+        self.directory_requests={}
+        self.directory_scan=False
+        self.local_signature=None
+        self.remote_signature=None
+        self.included_count=0
+        self.trees={}
+        self.tree_labels={}
+        for side,title in (('remote','远端目录'),('local','本地目录')):
+            pane=QWidget()
+            column=QVBoxLayout(pane);column.setContentsMargins(0,0,0,0);column.setSpacing(4)
+            header=QHBoxLayout()
+            label=QLabel(title);label.setStyleSheet('font-weight:700')
+            header.addWidget(label)
+            location=ElidedLabel();header.addWidget(location,1)
+            if side=='remote':
+                self.button(header,'获取',lambda:self.run('fetch')).setToolTip('获取远端版本，刷新目录和待拉取状态')
+            column.addLayout(header)
+            tree=QTreeWidget()
+            tree.setAccessibleName(title);tree.setHeaderHidden(True);tree.setUniformRowHeights(True);tree.setMinimumHeight(52)
+            tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            tree.customContextMenuRequested.connect(lambda pos,key=side:self.tree_menu(key,pos))
+            tree.itemExpanded.connect(lambda item,key=side:self.expand_directory(key,item))
+            tree.itemDoubleClicked.connect(lambda item,_,key=side:self.activate_tree_item(key,item))
+            column.addWidget(tree,1)
+            self.trees[side]=tree;self.tree_labels[side]=location
+            self.directory_split.addWidget(pane)
+        self.remote_tree=self.trees['remote'];self.local_tree=self.trees['local']
+        self.directory_split.setSizes([200,260])
+        self.clear_directories()
+        split.addWidget(self.directory_split)
+        right=QWidget();right.setMinimumWidth(250);rl=QVBoxLayout(right)
+        rl.setContentsMargins(3,0,0,0);rl.setSpacing(5)
+        filebar=QHBoxLayout();filebar.setSpacing(5)
+        title=QLabel('改动列表');title.setStyleSheet('font-weight:700')
+        filebar.addWidget(title)
+        self.filter=QLineEdit();self.filter.setMinimumWidth(0);self.filter.setPlaceholderText('搜索改动文件');filebar.addWidget(self.filter,1)
+        rl.addLayout(filebar)
+        self.files=QListWidget()
+        self.files.setAccessibleName('改动列表');self.files.setMinimumSize(0,68)
+        self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.files.setTextElideMode(Qt.ElideMiddle);self.files.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.files.setContextMenuPolicy(Qt.CustomContextMenu);self.files.customContextMenuRequested.connect(self.changes_menu)
+        rl.addWidget(self.files,1)
+        self.change_summary=ElidedLabel('右键文件可选择要提交的改动')
+        rl.addWidget(self.change_summary)
+        commitbar=QHBoxLayout();commitbar.setSpacing(5);self.commit_actions=commitbar
+        self.message=QLineEdit();self.message.setMinimumWidth(45);self.message.setPlaceholderText('填写提交说明');commitbar.addWidget(self.message,1)
         self.amend=QCheckBox('修订最近提交',self);self.amend.hide()
         self.commit_options=self.button(commitbar,'选项…',self.commit_menu)
-        self.commit_button=self.button(commitbar,'保存本地版本',self.commit);self.commit_button.setObjectName('primary');self.commit_button.setToolTip('仅保存到本机；需要分享时再打开“同步”上传给队友');cl.addLayout(commitbar)
+        self.commit_button=self.button(commitbar,'提交到本地',self.commit)
+        self.commit_button.setObjectName('primary')
+        self.commit_button.setToolTip('提交已加入的改动。提交完成后可通过「同步」推送。')
+        rl.addLayout(commitbar)
+        split.addWidget(right);split.setStretchFactor(0,4);split.setStretchFactor(1,6);split.setSizes([360,580])
         self.amend.toggled.connect(self.update_commit_ui);self.update_commit_ui()
-        self.changes_page=changes;self.tabs.addTab(changes,'我修改的内容')
+        self.changes_page=changes;self.tabs.addTab(changes,'待提交')
         history=QWidget();hl=QVBoxLayout(history);hl.setContentsMargins(6,6,6,6);hl.setSpacing(6)
         self.history_search=QLineEdit();self.history_search.setPlaceholderText('搜索已加载历史（最近 200 条）');hl.addWidget(self.history_search)
         self.history_split=QSplitter();hs=self.history_split;hs.setChildrenCollapsible(False);hs.setHandleWidth(8)
         self.history=QListWidget();self.history.setMinimumSize(150,70);self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);self.history.setTextElideMode(Qt.ElideMiddle);hs.addWidget(self.history)
-        self.commit_diff=QPlainTextEdit();self.commit_diff.setMinimumSize(200,70);self.commit_diff.setReadOnly(True);self.commit_diff.setFont(QFont('Consolas',10));self.commit_diff.setStyleSheet('font-family:Consolas,"Microsoft YaHei UI";font-size:14px;');hs.addWidget(self.commit_diff)
+        self.history_info=QPlainTextEdit();self.history_info.setMinimumSize(200,70);self.history_info.setReadOnly(True);hs.addWidget(self.history_info)
         hs.setStretchFactor(0,3);hs.setStretchFactor(1,7);hs.setSizes([280,650]);hl.addWidget(hs,1)
-        self.button(hl,'所选提交操作…',self.history_menu);self.history_page=history;self.tabs.addTab(history,'版本记录')
+        self.history.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.history.customContextMenuRequested.connect(self.history_menu)
+        self.history_page=history;self.tabs.addTab(history,'已提交')
         stashpage=QWidget(self);sl=QVBoxLayout(stashpage);self.stashes=QListWidget();sl.addWidget(self.stashes,1);sb=QVBoxLayout();self.button(sb,'储藏当前改动',self.stash_save)
         for label,op in [('应用并保留','stash_apply'),('恢复并移除','stash_pop'),('删除储藏','stash_drop')]:self.button(sb,label,lambda checked=False,o=op:self.stash_action(o))
         sl.addLayout(sb);stashpage.hide()
         self.log=QPlainTextEdit(self);self.log.setReadOnly(True);self.log.hide();self.aux_pages={'储藏改动':stashpage,'操作记录':self.log}
         footer=QHBoxLayout();self.status=ElidedLabel('就绪');footer.addWidget(self.status,1)
         self.environment_status=ElidedLabel('Git 正在检查');self.environment_status.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Preferred);self.environment_status.setFixedWidth(104);footer.addWidget(self.environment_status);root.addLayout(footer)
-        self.repositories.currentIndexChanged.connect(self.select_repo);self.files.currentItemChanged.connect(self.show_diff);self.staged.toggled.connect(self.show_diff)
+        self.repositories.currentIndexChanged.connect(self.select_repo)
         self.filter.textChanged.connect(self.filter_files);self.history.currentItemChanged.connect(self.show_commit);self.history_search.textChanged.connect(self.filter_history)
         self.tabs.currentChanged.connect(self.tab_changed)
         self.timer=QTimer(self);self.timer.setInterval(15000);self.timer.timeout.connect(self.auto_refresh);self.timer.start()
@@ -200,26 +250,21 @@ class Panel(QWidget):
         super().resizeEvent(event)
         if not hasattr(self,'changes_page'):return
         compact=self.height()<430
-        self.summary.setVisible(not compact);self.files_tools.setVisible(not compact)
+        self.summary.setVisible(not compact)
+        self.change_summary.setVisible(not compact)
         self.layout().setContentsMargins(8,4 if compact else 8,8,4 if compact else 8)
         margin=4 if compact else 6;self.changes_page.layout().setContentsMargins(margin,margin,margin,margin)
+
     def minimumSizeHint(self):
         hint=super().minimumSizeHint()
-        if not hasattr(self,'history_page'):return hint
-        # Advertise the supported compact layout before the first resize. Otherwise
-        # Qt enforces the spacious layout minimum and never reaches compact mode.
-        split=self.workspace_split;left=split.widget(0);right=split.widget(1)
-        left_height=left.minimumSizeHint().height()
-        if not self.files_tools.isHidden():left_height-=self.files_tools.minimumSizeHint().height()+left.layout().spacing()
-        split_height=max(left_height,right.minimumSizeHint().height())
-        changes_height=self.changes_page.minimumSizeHint().height()-(split.minimumSizeHint().height()-split_height)
-        margins=self.changes_page.layout().contentsMargins();changes_height-=max(0,margins.top()+margins.bottom()-8)
-        pages_height=max(changes_height,self.history_page.minimumSizeHint().height())
-        normal_pages=max(self.changes_page.minimumSizeHint().height(),self.history_page.minimumSizeHint().height())
-        height=hint.height()-max(0,normal_pages-pages_height)
-        if not self.summary.isHidden():height-=self.summary.minimumSizeHint().height()+self.layout().spacing()
-        margins=self.layout().contentsMargins();height-=max(0,margins.top()+margins.bottom()-8)
-        return QSize(hint.width(),height)
+        if not hasattr(self,'changes_page'):
+            return hint
+        height=hint.height()
+        if not self.summary.isHidden():
+            height-=self.summary.minimumSizeHint().height()+self.layout().spacing()
+        if not self.change_summary.isHidden():
+            height-=self.change_summary.minimumSizeHint().height()
+        return QSize(hint.width(), height)
     def worker_environment(self,p):
         root=self.context.data_root/'worker-temp' if self.settings.get('git') else runtime_root(self.context.package_root)/'tmp'
         temp=no_links(root);temp.mkdir(parents=True,exist_ok=True)
@@ -238,7 +283,9 @@ class Panel(QWidget):
         self.git_ready=False;self.runtime_cancelled=False;self.runtime_buffer=b''
         self.runtime_view()
         self.runtime_label.setText('正在准备工具私有 Git…');self.runtime_progress.show();self.runtime_progress.setRange(0,0)
-        self.runtime_retry.setEnabled(False);self.runtime_cancel.setEnabled(True)
+        self.runtime_retry.setEnabled(False);self.runtime_cancel.setEnabled(True);self.runtime_use_existing.setEnabled(False)
+        self.runtime_history=[];self.runtime_phase='正在准备 Git';self.runtime_done=self.runtime_total=0
+        self.runtime_since=time.monotonic();self.runtime_timer.start()
         self.proc=QProcess(self);p=self.proc;self.after=('prepare_git',None,False)
         try:
             self.worker_environment(p)
@@ -257,10 +304,34 @@ class Panel(QWidget):
             try:row=json.loads(line)
             except ValueError:continue
             if 'progress' in row:
-                self.runtime_label.setText(row['progress']);total=row.get('total',0);done=row.get('done',0)
+                phase=row['progress'];total=row.get('total',0);done=row.get('done',0)
+                if phase!=self.runtime_phase:
+                    self.runtime_history.append(phase)
+                if phase!=self.runtime_phase or done!=self.runtime_done:
+                    self.runtime_since=time.monotonic()
+                self.runtime_phase,self.runtime_done,self.runtime_total=phase,done,total
                 self.runtime_progress.setRange(0,100 if total else 0)
-                if total:self.runtime_progress.setValue(int(done*100/total))
+                if total:self.runtime_progress.setValue(min(100,int(done*100/total)))
+                self.update_runtime_progress()
+
+    def update_runtime_progress(self):
+        if self.runtime_cancelled or not self.proc:
+            return
+        phase=self.runtime_phase
+        elapsed=int(time.monotonic()-self.runtime_since)
+        text=phase
+        if self.runtime_total:
+            mib=1024*1024
+            text+=f" · {int(self.runtime_done*100/self.runtime_total)}% · {self.runtime_done/mib:.1f} / {self.runtime_total/mib:.1f} MB"
+        if elapsed>=5:
+            waiting='未收到新数据' if phase=='下载 Git' else '已等待'
+            text+=f' · {waiting} {elapsed} 秒'
+        self.runtime_label.setText(text)
+
+    def runtime_details(self):
+        self.show_text('\n'.join([*self.runtime_history,self.runtime_label.text()]))
     def start_error(self,p,error):
+        self.runtime_timer.stop();self.runtime_use_existing.setEnabled(True)
         self.proc=None;self.after=None;self.git_pending=None;p.deleteLater()
         self.runtime_retry.setEnabled(True);self.runtime_cancel.setEnabled(False);self.runtime_progress.setRange(0,100);self.runtime_progress.setValue(0)
         message='无法准备后台运行目录或启动资源：'+str(error)+'。请检查工具目录写入权限和磁盘空间后重试。'
@@ -270,7 +341,8 @@ class Panel(QWidget):
         if error==QProcess.FailedToStart:self.runtime_finished(-1,None)
     def runtime_finished(self,code,status):
         if self.closed or not self.proc:return
-        self.runtime_output();p=self.proc;self.proc=None;self.after=None;p.deleteLater()
+        self.runtime_output();self.runtime_timer.stop();self.runtime_use_existing.setEnabled(True)
+        p=self.proc;self.proc=None;self.after=None;p.deleteLater()
         self.runtime_retry.setEnabled(True);self.runtime_cancel.setEnabled(False);self.runtime_progress.setRange(0,100)
         try:result=json.loads(self.runtime_buffer)
         except ValueError:result={'ok':False,'error':'Git 准备中断，请重试。'}
@@ -350,13 +422,6 @@ class Panel(QWidget):
         self.button(layout,'返回工作区',d.accept)
         try:d.exec()
         finally:page.hide();page.setParent(self);d.deleteLater()
-    def changes_menu(self):
-        self.menu([('选入全部改动',self.stage_all),('选入所选文件',lambda:self.stage(False)),('移出所选文件',lambda:self.stage(True)),('所选文件的打开、历史与冲突操作…',self.file_menu)])
-    def diff_menu(self):
-        m=QMenu(self);a=m.addAction('只看选入本次版本的改动');a.setCheckable(True);a.setChecked(self.staged.isChecked());a.toggled.connect(self.staged.setChecked)
-        m.addSeparator();m.addAction('部分暂存：勾选修改行…',self.partial_stage)
-        try:m.exec(self.cursor().pos())
-        finally:m.deleteLater()
     def commit_menu(self):
         m=QMenu(self);m.addAction('编辑详细说明…',self.edit_description)
         a=m.addAction('修订最近提交');a.setCheckable(True);a.setChecked(self.amend.isChecked());a.toggled.connect(self.amend.setChecked)
@@ -364,7 +429,8 @@ class Panel(QWidget):
         finally:m.deleteLater();self.update_commit_ui()
     def update_commit_ui(self):
         self.commit_options.setToolTip(('已启用：修订最近提交\n' if self.amend.isChecked() else '')+('已填写详细说明' if self.description else '编辑详细说明或修订最近提交'))
-        self.commit_button.setText('修订本地版本' if self.amend.isChecked() else '保存本地版本')
+        self.commit_button.setText('修订本地提交' if self.amend.isChecked() else '提交到本地')
+        self.commit_button.setEnabled(bool(self.repo and (self.amend.isChecked() or self.included_count)))
     def advanced_sync_menu(self):
         self.menu([('变基拉取',lambda:self.confirm_run('pull','拉取远程并重放本地提交？',{'rebase':True})),('安全强制推送…',lambda:self.confirm_run('push','使用 force-with-lease 推送改写后的历史。可能替换远端已有提交，确认继续？',{'force':True}))])
     def ask(self,title,label,value=''):
@@ -382,12 +448,12 @@ class Panel(QWidget):
         box=QMessageBox(self);box.setWindowTitle('确认操作');box.setText(text);yes=box.addButton('确认执行',QMessageBox.AcceptRole);box.addButton('取消',QMessageBox.RejectRole);box.exec();accepted=box.clickedButton() is yes;box.deleteLater();return accepted
     def warn(self,text):
         box=QMessageBox(self);box.setWindowTitle('操作提示');box.setText(text);box.addButton('知道了',QMessageBox.AcceptRole);box.exec();box.deleteLater()
-    def menu(self,entries):
+    def menu(self,entries,position=None):
         m=QMenu(self)
         for label,fn in entries:
             if fn is None:m.addSection(label)
             else:m.addAction(label,fn)
-        try:m.exec(self.cursor().pos())
+        try:m.exec(position if position is not None else self.cursor().pos())
         finally:m.deleteLater()
     def save(self):
         self.settings['last_repo']=self.repo;self.context.save_settings(self.settings)
@@ -395,7 +461,7 @@ class Panel(QWidget):
         if self.closed:return
         workspace=getattr(self.context,'workspace_state',{})
         if self.repo and workspace.get('animation_working_root')==self.repo:
-            if op!='snapshot':
+            if op not in ('snapshot','tree'):
                 self.status.setText('LXMaxAnimation 正在同步同一个库，完成后再试。')
             return
         if self.animation_repo and self.repo==self.animation_repo:
@@ -410,7 +476,8 @@ class Panel(QWidget):
         if not self.repo and op not in ('environment','init','clone','login','github_user','github_repos','github_create'):
             self.warn('请先添加、创建或克隆一个仓库。');return
         request={'op':op,'args':args or {},'repo':self.repo,'git':self.settings.get('git',''),'host':self.settings.get('github_host','github.com'),'package':str(self.context.package_root)}
-        self.proc=QProcess(self);p=self.proc;self.status.setText('正在处理，请稍候…');self.after=(op,callback,refresh)
+        self.proc=QProcess(self);p=self.proc;self.after=(op,callback,refresh)
+        if op!='tree':self.status.setText('正在处理，请稍候…')
         try:
             self.worker_environment(p)
             p.setProgram(str(self.context.resource('bin/LXGit-worker.exe')))
@@ -418,11 +485,11 @@ class Panel(QWidget):
             self.start_error(p,error);return
         p.finished.connect(self.finished);p.errorOccurred.connect(self.failed)
         p.started.connect(lambda:(p.write(json.dumps(request,ensure_ascii=False).encode('utf-8')),p.closeWriteChannel()))
-        if self.repo and op not in ('snapshot','history','diff','show'):
+        if self.repo and op not in ('snapshot','tree','history','diff','show','file_history','workspace_diff'):
             self.working_root=self.repo
             workspace['lxgit_working_root']=self.working_root
         p.start()
-    def release_working_root(self,*_):
+    def release_working_root(self):
         workspace=getattr(self.context,'workspace_state',{})
         if self.working_root and workspace.get('lxgit_working_root')==self.working_root:
             workspace.pop('lxgit_working_root',None)
@@ -445,14 +512,22 @@ class Panel(QWidget):
         try:result=json.loads(data.decode('utf-8'))
         except Exception:result={'ok':False,'error':'后台异常退出。'+err[-1500:]}
         if not result.get('ok'):
-            self.status.setText('操作未完成，详情见操作记录');self.log.appendPlainText('操作失败：'+result.get('error','未知错误'));self.warn(result.get('error','未知错误'))
-            if op not in ('snapshot','history','diff','show'):QTimer.singleShot(0,self.refresh)
+            self.status.setText('操作未完成，详情见操作记录')
+            self.log.appendPlainText('操作失败：'+result.get('error','未知错误'))
+            if op=='tree':
+                QTimer.singleShot(0,self.load_next_directory)
+                return
+            self.warn(result.get('error','未知错误'))
+            if op not in ('snapshot','history','diff','show','file_history','workspace_diff'):
+                QTimer.singleShot(0,self.refresh)
             return
-        value=result.get('data');self.status.setText('就绪')
-        if op not in ('snapshot','history','diff','show','github_user','github_repos','github_prs','environment'):
+        value=result.get('data')
+        if op!='tree':self.status.setText('就绪')
+        if op not in ('snapshot','tree','history','diff','show','file_history','workspace_diff','github_user','github_repos','github_prs','environment'):
             self.log.appendPlainText('操作完成\n'+(value if isinstance(value,str) else '请求已完成'))
         if callback:callback(value)
         elif refresh:QTimer.singleShot(0,self.refresh)
+        QTimer.singleShot(0,self.load_next_directory)
     def auto_refresh(self):
         if self.repo and not self.proc and self.isVisible() and not self.window().isModal():
             from PySide6.QtWidgets import QApplication
@@ -468,18 +543,17 @@ class Panel(QWidget):
         self.summary.setToolTip(self.repo+'\n'+self.summary.text()+'\n'+state['remotes']);self.repositories.setToolTip(self.repo);self.branch_button.setToolTip('当前分支：'+state['branch']);self.branches.clear();self.branches.addItems(state['branches'])
         self.branches.setCurrentText(state['branch']);self.operation.setText('当前有未完成的'+ ' / '.join({'merge':'合并','rebase':'变基','cherry-pick':'拣选','revert':'反向提交'}.get(x,x) for x in state['operations'])+'。请解决冲突后在“分支”菜单继续或中止。' if state['operations'] else '')
         self.operation.setVisible(bool(state['operations']))
-        old=self.files.currentItem();oldpath=old.data(Qt.UserRole)['path'] if old else None
-        self.files.blockSignals(True);self.files.clear()
-        for f in state['files']:
-            item=QListWidgetItem(('⚠ ' if f['conflict'] else '')+STATUS.get(f['status'],'状态变更 '+f['status'])+'  '+f['path']);item.setData(Qt.UserRole,f);item.setToolTip(f['path']);self.files.addItem(item)
-            if f['path']==oldpath:self.files.setCurrentItem(item)
-        self.files.blockSignals(False);self.filter_files();self.stashes.clear();self.stashes.addItems(state['stashes'])
-        if self.tabs.currentWidget() is self.history_page:self.load_history()
+        self.render_changes()
+        self.stashes.clear();self.stashes.addItems(state['stashes'])
+        self.refresh_directories()
+        if self.tabs.currentWidget() is self.history_page:
+            self.load_history()
     def select_repo(self):
         if self.repository_busy():
             self.repositories.blockSignals(True);self.repositories.setCurrentIndex(self.repositories.findData(self.repo));self.repositories.blockSignals(False);return
-        self.repo=self.repositories.currentData() or '';self.diff.clear();self.history.clear();self.commit_diff.clear();self.save()
+        self.repo=self.repositories.currentData() or '';self.history.clear();self.history_info.clear();self.save()
         self.git_pending=None;self.state={};self.files.clear();self.branches.clear();self.stashes.clear();self.operation.clear();self.operation.hide()
+        self.clear_directories();self.render_changes()
         if not self.repo:
             self.summary.setText('从队友的 GitHub 地址下载游戏项目，或添加电脑上已有的项目。')
         else:
@@ -516,33 +590,298 @@ class Panel(QWidget):
         repos=self.settings.get('repositories',[])
         if self.repo in repos:repos.remove(self.repo)
         self.repositories.removeItem(self.repositories.currentIndex());self.save()
-    def selected(self):return [i.data(Qt.UserRole) for i in self.files.selectedItems()]
-    def stage(self,unstage=False):
-        paths=[f['path'] for f in self.selected()]
-        if paths:self.run('unstage' if unstage else 'stage',{'paths':paths})
-    def stage_all(self):
-        paths=[f['path'] for f in self.state.get('files',[])]
-        if paths:self.run('stage',{'paths':paths})
-    def show_diff(self,*_):
-        item=self.files.currentItem()
-        if not item or self.proc:return
-        f=item.data(Qt.UserRole);self.file_label.setText(f['path']);self.run('diff',{'path':f['path'],'staged':self.staged.isChecked(),'untracked':f['status']=='??'},self.diff.setPlainText,False)
+    def clear_directories(self):
+        self.directory_requests.clear()
+        self.local_signature=self.remote_signature=None
+        for side,text in (('local','选择项目后显示工作区'),('remote','获取远端后显示目录')):
+            self.trees[side].clear()
+            self.tree_labels[side].setText(text)
+
+    def refresh_workspace(self):
+        self.directory_scan=True
+        self.refresh()
+
+    def refresh_directories(self):
+        remote=self.state.get('remoteTree') or {}
+        ref,commit=remote.get('ref'),remote.get('commit')
+        self.tree_labels['local'].setText(self.repo)
+        self.tree_labels['remote'].setText(ref if commit else '无远端快照 · 点击获取')
+        if commit and self.remote_signature!=commit:
+            self.directory_requests['remote','']=commit
+            for path in self.expanded_directories('remote'):
+                self.directory_requests['remote',path]=commit
+        elif not commit:
+            self.remote_tree.clear()
+        self.remote_signature=commit
+        changes=tuple((f['path'],f['status']) for f in self.state['files'])
+        if self.directory_scan or changes!=self.local_signature:
+            self.directory_requests['local','']=''
+            for path in self.expanded_directories('local'):
+                self.directory_requests['local',path]=''
+        self.directory_scan=False
+        self.local_signature=changes
+        QTimer.singleShot(0,self.load_next_directory)
+
+    def expanded_directories(self,side):
+        pending=[self.trees[side].invisibleRootItem()]
+        parents=[]
+        while pending:
+            parent=pending.pop()
+            for i in range(parent.childCount()):
+                child=parent.child(i)
+                info=child.data(0,Qt.UserRole)
+                if info and info['kind']=='directory' and child.isExpanded():
+                    parents.append(info['path']);pending.append(child)
+        return parents
+
+    def expand_directory(self,side,item):
+        info=item.data(0,Qt.UserRole)
+        if info and info['kind']=='directory':
+            self.directory_requests[side,info['path']]=self.remote_signature if side=='remote' else ''
+            self.load_next_directory()
+
+    def load_next_directory(self):
+        if self.closed or self.proc or not self.git_ready or not self.directory_requests or not self.repo:
+            return
+        if self.tabs.currentWidget() is not self.changes_page:
+            return
+        if getattr(self.context,'workspace_state',{}).get('animation_working_root')==self.repo:
+            return
+        key=next(iter(self.directory_requests));side,path=key
+        commit=self.directory_requests.pop(key)
+        args={'side':side,'path':path}
+        if side=='remote':
+            if not commit:
+                QTimer.singleShot(0,self.load_next_directory)
+                return
+            args['commit']=commit
+        root=self.repo
+        def loaded(data):
+            if self.repo==root and (side=='local' or self.remote_signature==commit):
+                self.render_directory(side,path,data)
+        self.run('tree',args,loaded,False)
+
+    def directory_item(self,side,path):
+        parent=self.trees[side].invisibleRootItem()
+        for component in path.split('/') if path else ():
+            child=next((parent.child(i) for i in range(parent.childCount())
+                        if parent.child(i).text(0)==component),None)
+            if child is None:
+                return None
+            parent=child
+        return parent
+
+    def render_directory(self,side,path,data):
+        parent=self.directory_item(side,path)
+        if parent is None:
+            return
+        old={parent.child(i).text(0):parent.child(i) for i in range(parent.childCount())}
+        tree=self.trees[side]
+        icons={kind:tree.style().standardIcon(icon) for kind,icon in
+               (('directory',QStyle.SP_DirIcon),('file',QStyle.SP_FileIcon))}
+        objects=[]
+        tree.blockSignals(True)
+        try:
+            for entry in data['entries']:
+                name=entry['name'];kind=entry['kind']
+                item=old.pop(name,None)
+                previous=item.data(0,Qt.UserRole) if item is not None else None
+                if previous is None or previous['kind']!=kind:
+                    item=QTreeWidgetItem([name])
+                rel=entry.get('path') or (path+'/'+name if path else name)
+                item.setData(0,Qt.UserRole,{**entry,'path':rel})
+                item.setToolTip(0,rel)
+                item.setIcon(0,icons[kind])
+                item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator if kind=='directory' else QTreeWidgetItem.DontShowIndicatorWhenChildless)
+                objects.append((item,item.isExpanded(),item.isSelected()))
+            parent.takeChildren()
+            parent.addChildren([item for item,_,_ in objects])
+            for item,expanded,selected in objects:
+                if expanded:item.setExpanded(True)
+                if selected:item.setSelected(True)
+        finally:
+            tree.blockSignals(False)
+
+    def open_workspace_path(self,path,folder=False):
+        if not self.repo:
+            return
+        root=Path(self.repo).resolve()
+        target=(root/path).resolve()
+        if not target.is_relative_to(root):
+            return
+        if folder and not target.is_dir():
+            target=target.parent
+        if target.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def activate_tree_item(self,side,item):
+        info=item.data(0,Qt.UserRole)
+        if side=='local' and info and info['kind']=='file':
+            self.open_workspace_path(info['path'])
+
+    def tree_menu(self,side,position):
+        tree=self.trees[side]
+        at=tree.viewport().mapToGlobal(position)
+        if not self.repo:
+            self.menu([('添加已有项目…',lambda:self.add_repo(QFileDialog.getExistingDirectory(self,'选择已有游戏项目'))),
+                       ('下载团队项目…',self.clone_repo)],at)
+            return
+        item=tree.itemAt(position)
+        info=item.data(0,Qt.UserRole) if item else None
+        if item:tree.setCurrentItem(item)
+        path=info['path'] if info else ''
+        if side=='remote':
+            commit=self.remote_signature
+            entries=[('获取远端快照',lambda:self.run('fetch')),('拉取更新到本地',lambda:self.run('pull'))]
+            if info and commit:
+                entries.append(('与本地提交比较…',lambda:self.run('workspace_diff',{'path':path,'commit':commit},lambda text:self.diff_dialog(path,text),False)))
+                if info['kind']=='file':
+                    entries.append(('查看远端文件历史…',lambda:self.run('file_history',{'path':path,'commit':commit},self.show_text,False)))
+        elif info and info['kind']=='file':
+            entries=self.file_entries(self.change_files.get(path,{'path':path,'status':'  ','conflict':False}))
+        else:
+            scoped=[f for f in self.state.get('files',[]) if not path or f['path'].startswith(path+'/')]
+            entries=[('在资源管理器打开',lambda:self.open_workspace_path(path,True)),('刷新目录',self.refresh_workspace)]
+            if path:entries.append(('筛选此目录的改动',lambda:self.filter.setText(path+'/')))
+            included=[f for f in scoped if self.lanes(f)[0]]
+            pending=[f for f in scoped if self.lanes(f)[1] and not f['conflict']]
+            if pending:entries.append(('将此目录改动加入本次提交',lambda:self.stage_files(pending)))
+            if included:entries.append(('将此目录改动移出本次提交',lambda:self.stage_files(included,True)))
+        if path:entries.append(('复制相对路径',lambda:QApplication.clipboard().setText(path)))
+        else:entries.extend([('项目设置…',self.repo_menu),('分支管理…',self.branch_panel),('同步操作…',self.sync_panel)])
+        self.menu(entries,at)
+
+    def selected(self):
+        return [info for item in self.files.selectedItems() if (info:=item.data(Qt.UserRole))]
+
+    @staticmethod
+    def lanes(file):
+        status=file['status']
+        return (not file['conflict'] and status[0] not in ' ?!',
+                file['conflict'] or status[1]!=' ')
+
+    def change_text(self,file,lane):
+        if file['conflict']:return '冲突'
+        code=file['status'][0 if lane=='included' else 1]
+        return {'?':'新增','M':'修改','A':'新增','D':'删除','R':'重命名','C':'复制','T':'类型变更'}.get(code,'变更')
+
+    def render_changes(self):
+        identities={(f['path'],f['lane']) for f in self.selected()}
+        self.files.clear()
+        changes=self.state.get('files',[])
+        self.change_files={file['path']:file for file in changes}
+        self.change_paths={}
+        for lane,title,index in (('included','已加入本次提交',0),('pending','未加入本次提交',1)):
+            group=[file for file in changes if self.lanes(file)[index]]
+            self.change_paths[lane]=group
+            header=QListWidgetItem(f'{title}  ·  {len(group)}')
+            header.setFlags(Qt.ItemIsEnabled)
+            font=header.font();font.setBold(True);header.setFont(font)
+            header.setForeground(QColor('#44643b'));header.setBackground(QColor('#edf3e6'))
+            self.files.addItem(header)
+            for file in group:
+                item=QListWidgetItem(f"  {self.change_text(file,lane)}   {file['path']}")
+                item.setData(Qt.UserRole,{**file,'lane':lane})
+                item.setToolTip(f"{file['old']} → {file['path']}" if file.get('old') else file['path'])
+                self.files.addItem(item)
+                if (file['path'],lane) in identities:item.setSelected(True)
+        included=self.included_count=len(self.change_paths['included'])
+        pending=len(self.change_paths['pending'])
+        self.change_summary.setText(f'本次提交 {included} 项 · 未加入 {pending} 项' if changes else '工作区没有待提交改动')
+        self.update_commit_ui()
+        self.filter_files()
+
+    def stage_files(self,files,unstage=False):
+        paths={}
+        for f in files:
+            if f.get('old') and f['status'][0 if unstage else 1]=='R':
+                paths[f['old']]=None
+            paths[f['path']]=None
+        if paths:self.run('unstage' if unstage else 'stage',{'paths':list(paths)})
+
     def filter_files(self):
-        for i in range(self.files.count()):self.files.item(i).setHidden(self.filter.text().lower() not in self.files.item(i).text().lower())
-    def partial_stage(self):
-        item=self.files.currentItem()
-        if not item or item.data(Qt.UserRole)['status']=='??' or 'D' in item.data(Qt.UserRole)['status']:self.warn('请先选择已跟踪的文本文件。新增和删除文件请使用整文件暂存。');return
-        self.run('diff',{'path':item.data(Qt.UserRole)['path']},self.patch_dialog,False)
+        query=self.filter.text().casefold()
+        for i in range(self.files.count()):
+            item=self.files.item(i)
+            info=item.data(Qt.UserRole)
+            item.setHidden(bool(info and query not in (info['path']+' '+info.get('old','')).casefold()))
+
+    def changes_menu(self,position=None):
+        item=self.files.itemAt(position) if position is not None else self.files.currentItem()
+        data=item.data(Qt.UserRole) if item else None
+        selection=[]
+        if data:
+            if not item.isSelected():self.files.clearSelection();item.setSelected(True)
+            self.files.setCurrentItem(item,QItemSelectionModel.NoUpdate)
+            selection=self.selected()
+        if len(selection)==1:
+            entries=self.file_entries(data)
+        elif selection:
+            entries=[]
+            pending=[f for f in selection if f['lane']=='pending' and not f['conflict']]
+            included=[f for f in selection if f['lane']=='included']
+            if pending:entries.append(('加入本次提交',lambda:self.stage_files(pending)))
+            if included:entries.append(('移出本次提交',lambda:self.stage_files(included,True)))
+        else:
+            entries=[]
+            pending=[f for f in self.change_paths.get('pending',[]) if not f['conflict']]
+            if pending:entries.append(('将全部未加入的改动加入本次提交',lambda:self.stage_files(pending)))
+            entries.extend([('刷新改动列表',self.refresh_workspace),('提交已加入的改动…',self.commit),
+                            ('推送本地提交…',self.push),('储藏当前改动…',self.stash_save)])
+        at=self.files.viewport().mapToGlobal(position) if position is not None else None
+        self.menu(entries,at)
+
+    def file_entries(self,file):
+        path=file['path']
+        included,pending=self.lanes(file)
+        entries=[]
+        lane=file.get('lane')
+        if pending and not file['conflict'] and lane!='included':
+            entries.append(('加入本次提交',lambda:self.stage_files([file])))
+        if included and lane!='pending':
+            entries.append(('移出本次提交',lambda:self.stage_files([file],True)))
+        if pending:entries.append(('查看未加入的差异…',lambda:self.show_file_diff(file)))
+        if included:entries.append(('查看已加入的差异…',lambda:self.show_file_diff(file,True)))
+        if pending and not file['conflict'] and file['status']!='??' and 'D' not in file['status']:
+            entries.append(('逐行加入本次提交…',lambda:self.run('diff',{'path':path},self.patch_dialog,False)))
+        entries.extend([('打开文件',lambda:self.open_workspace_path(path)),
+                        ('打开所在目录',lambda:self.open_workspace_path(path,True)),
+                        ('查看文件历史…',lambda:self.run('file_history',{'path':path},self.show_text,False))])
+        if Path(path).suffix.lower() in {'.png','.jpeg','.jpg','.gif','.bmp','.webp','.tif','.tiff'}:
+            entries.append(('图片前后对比…',lambda:self.run('image_diff',{'path':path},self.image_dialog,False)))
+        if pending and not file['conflict'] and file['status']!='??':
+            entries.append(('丢弃未加入的改动…',lambda:self.discard(path)))
+        if file['conflict']:
+            entries.extend([('解决冲突：采用当前一方…',lambda:self.resolve(path,'ours')),
+                            ('解决冲突：采用传入一方…',lambda:self.resolve(path,'theirs')),
+                            ('标记已手动解决',lambda:self.stage_files([file]))])
+        return entries
+
+    def show_file_diff(self,file,staged=False):
+        self.run('diff',{'path':file['path'],'staged':staged,'untracked':file['status']=='??'},
+                 lambda text:self.diff_dialog(file['path'],text),False)
+
+    def diff_dialog(self,path,content):
+        d=self.dialog('查看差异',940,640)
+        layout=QVBoxLayout(d)
+        layout.addWidget(ElidedLabel(path))
+        view=QPlainTextEdit(content or '所选版本之间没有可显示的差异。')
+        view.setReadOnly(True);view.setFont(QFont('Consolas',10));layout.addWidget(view,1)
+        highlighter=DiffColors(view.document())
+        self.button(layout,'关闭',d.accept)
+        try:d.exec()
+        finally:d.deleteLater()
+
     def patch_dialog(self,patch):
         if not patch or 'Binary files' in patch:self.warn('没有可逐行暂存的文本差异。');return
-        d=self.dialog('部分暂存 · 选择修改行',950,650);l=QVBoxLayout(d);note=QLabel('勾选要暂存的新增或删除行；未勾选的修改留在工作区。');note.setWordWrap(True);l.addWidget(note)
+        d=self.dialog('逐行加入本次提交',950,650);l=QVBoxLayout(d);note=QLabel('勾选要加入本次提交的行。其余改动留在工作区。');note.setWordWrap(True);l.addWidget(note)
         rows=QListWidget();rows.setFont(QFont('Consolas',10));l.addWidget(rows,1);lines=patch.splitlines(keepends=True);choices={};in_hunk=False
         for index,line in enumerate(lines):
             if line.startswith('@@'):in_hunk=True
             item=QListWidgetItem(line.rstrip('\r\n'));rows.addItem(item)
             if in_hunk and line.startswith(('+','-')):
                 item.setFlags(item.flags()|Qt.ItemIsUserCheckable);item.setCheckState(Qt.Checked);choices[index]=item;item.setForeground(QColor('#28733a' if line.startswith('+') else '#b83239'))
-        b=QPushButton('暂存勾选的修改');l.addWidget(b);b.clicked.connect(d.accept)
+        b=QPushButton('加入所选修改');l.addWidget(b);b.clicked.connect(d.accept)
         accepted=d.exec();d.deleteLater()
         if accepted:
             if not any(item.checkState()==Qt.Checked for item in choices.values()):return
@@ -555,21 +894,12 @@ class Panel(QWidget):
                 else:output.append(line);dropped=False
             self.run('apply_patch',{'patch':''.join(output)})
     def commit(self):
+        if not self.included_count and not self.amend.isChecked():
+            self.warn('请先右键把要提交的文件加入本次提交。');return
         if not self.message.text().strip():self.warn('请填写提交说明。');return
         if self.amend.isChecked() and not self.confirm('修订将替换最近一次提交。若已推送，后续需要谨慎强制推送。继续吗？'):return
         self.run('commit',{'message':self.message.text()+('\n\n'+self.description if self.description else ''),'amend':self.amend.isChecked()},self.committed)
     def committed(self,_):self.description='';self.message.clear();self.amend.setChecked(False);self.update_commit_ui();self.refresh()
-    def file_menu(self):
-        item=self.files.currentItem()
-        if not item:return
-        f=item.data(Qt.UserRole);path=f['path']
-        entries=[('打开文件',lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.repo)/path)))),('查看此文件历史',lambda:self.run('file_history',{'path':path},self.show_text,False)),('图片前后对比',lambda:self.run('image_diff',{'path':path},self.image_dialog,False)),('丢弃未暂存修改…',lambda:self.discard(path))]
-        folder=Path(self.repo,path).parent
-        if folder.is_dir():
-            entries.insert(1,('打开所在文件夹',lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))))
-        if f['conflict']:
-            entries.extend([('解决冲突：采用当前一方…',lambda:self.resolve(path,'ours')),('解决冲突：采用传入一方…',lambda:self.resolve(path,'theirs')),('已手动解决，标记完成',lambda:self.run('stage',{'paths':[path]}))])
-        self.menu(entries)
     def discard(self,path):
         if self.confirm('将丢弃此文件的未暂存修改，恢复到暂存区版本：\n'+path+'\n此操作无法撤销。'):
             self.run('discard',{'path':path})
@@ -598,18 +928,24 @@ class Panel(QWidget):
         self.history.blockSignals(True);self.history.clear()
         for r in rows:
             item=QListWidgetItem(r['short']+'  '+r['subject']+'\n'+r['author']+' · '+r['date'][:10]+' '+r['refs']);item.setData(Qt.UserRole,r);item.setToolTip(item.text());self.history.addItem(item)
-        self.history.blockSignals(False);self.filter_history()
+        self.history.blockSignals(False);self.filter_history();self.show_commit()
     def filter_history(self):
         for i in range(self.history.count()):self.history.item(i).setHidden(self.history_search.text().lower() not in self.history.item(i).text().lower())
     def show_commit(self,*_):
         item=self.history.currentItem()
-        if item and not self.proc:self.run('show',{'ref':item.data(Qt.UserRole)['sha']},self.commit_diff.setPlainText,False)
-    def history_menu(self):
+        data=item.data(Qt.UserRole) if item else None
+        self.history_info.setPlainText(
+            f"{data['subject']}\n\n提交者  {data['author']}\n提交时间  {data['date']}\n提交编号  {data['sha']}"
+            if data else '')
+    def history_menu(self,position=None):
+        if position is not None and (clicked:=self.history.itemAt(position)):
+            self.history.setCurrentItem(clicked)
         item=self.history.currentItem();ref=item.data(Qt.UserRole)['sha'] if item else None
         entries=[('压缩最近几条提交…',lambda:self.rewrite_history('squash')),('重新排列最近提交…',lambda:self.rewrite_history('reorder')),('撤销最近提交（保留暂存内容）…',lambda:self.confirm_run('undo','撤销最近提交并保留其改动到暂存区？已发布提交建议使用反向提交。')),('查看操作恢复日志',lambda:self.run('reflog',callback=self.show_text,refresh=False))]
         if ref:
+            entries.insert(0,('查看此提交的差异…',lambda:self.run('show',{'ref':ref},lambda out:self.diff_dialog(ref,out),False)))
             entries.extend([('反向提交所选改动…',lambda:self.confirm_run('revert','创建反向提交撤销所选提交？',{'ref':ref})),('拣选到当前分支…',lambda:self.confirm_run('cherry-pick','将所选提交复制到当前分支？',{'ref':ref})),('重置到此提交（保留工作文件）…',lambda:self.confirm_run('reset','移动当前分支到所选提交，保留工作目录差异。继续吗？',{'ref':ref}))])
-        self.menu(entries)
+        self.menu(entries,self.history.viewport().mapToGlobal(position) if position is not None else None)
     def image_dialog(self,data):
         d=self.dialog('图片差异 · 最近提交与工作区',1000,650);layout=QVBoxLayout(d);l=QHBoxLayout();layout.addLayout(l,1)
         for key,title in [('before','最近提交'),('after','工作区')]:
@@ -634,7 +970,9 @@ class Panel(QWidget):
                 d.deleteLater()
             self.run('history',callback=got,refresh=False)
     def tab_changed(self,index):
-        if self.tabs.currentWidget() is self.history_page and self.repo and not self.proc:self.load_history()
+        if not self.repo or self.proc:return
+        if self.tabs.currentWidget() is self.history_page:self.load_history()
+        else:self.refresh()
     def stash_save(self):
         name=self.ask('储藏改动','储藏说明（包含未跟踪文件）','临时保存工作')
         if name is not None:self.run('stash_save',{'message':name})
@@ -723,16 +1061,16 @@ class Panel(QWidget):
         d=self.dialog('详细信息',800,520);l=QVBoxLayout(d);view=QPlainTextEdit(text);view.setReadOnly(True);l.addWidget(view);b=QPushButton('关闭');b.clicked.connect(d.accept);l.addWidget(b);d.exec();d.deleteLater()
     def beginner_guide(self):
         d=self.dialog('第一次和队友一起开发游戏',780,620);layout=QVBoxLayout(d)
-        text=QPlainTextEdit('LXGit 帮你保存游戏项目的版本，并与队友交换修改。\n\n第一次加入团队\n① 向队友要 GitHub 项目地址，选择“下载团队项目”。\n② 在 GitHub 菜单登录自己的账号。私有项目需要队友邀请你加入。\n③ 在项目菜单设置你的姓名和邮箱，让大家知道谁做了修改。\n\n每天的工作顺序\n① 开始制作前：检查队友更新 → 下载更新。\n② 正常在 Unity、3ds Max 或编辑器中制作并保存文件。\n③ 回到“我修改的内容”，检查文件，选入本次版本。\n④ 写清这次做了什么，点击“保存本地版本”。此时只保存在你的电脑。\n⑤ 点击“上传给队友”，队友下载更新后才能拿到你的修改。\n\nUnity 项目\nAssets、Packages、ProjectSettings 和资源对应的 .meta 文件应由团队共同管理。Library、Temp、Logs 等生成目录通常应忽略；请由项目负责人维护 .gitignore，不要见到很多文件就全部上传。\n\n模型、贴图和音频\n.max、.fbx、.psd、音频等大文件可由负责人配置 Git LFS；配置会生成 .gitattributes，也要分享给队友。大文件使用 LFS 后仍可能冲突，修改同一场景或模型前先和队友沟通。\n\n遇到冲突\n不要随手选择“采用一方”。先找修改过该文件的队友确认，保留双方需要的工作，再标记解决。高级历史操作不属于日常必做步骤。')
+        text=QPlainTextEdit('LXGit 帮你保存游戏项目的版本，并与队友交换修改。\n\n第一次加入团队\n① 向队友要 GitHub 项目地址，选择“下载团队项目”。\n② 在 GitHub 菜单登录自己的账号。私有项目需要队友邀请你加入。\n③ 在项目菜单设置你的姓名和邮箱，让大家知道谁做了修改。\n\n每天的工作顺序\n① 开始制作前：检查队友更新 → 下载更新。\n② 正常在 Unity、3ds Max 或编辑器中制作并保存文件。\n③ 回到“待提交”，检查文件，加入本次提交。\n④ 写清这次做了什么，点击“提交到本地”。此时只保存在你的电脑。\n⑤ 点击“上传给队友”，队友下载更新后才能拿到你的修改。\n\nUnity 项目\nAssets、Packages、ProjectSettings 和资源对应的 .meta 文件应由团队共同管理。Library、Temp、Logs 等生成目录通常应忽略；请由项目负责人维护 .gitignore，不要见到很多文件就全部上传。\n\n模型、贴图和音频\n.max、.fbx、.psd、音频等大文件可由负责人配置 Git LFS；配置会生成 .gitattributes，也要分享给队友。大文件使用 LFS 后仍可能冲突，修改同一场景或模型前先和队友沟通。\n\n遇到冲突\n不要随手选择“采用一方”。先找修改过该文件的队友确认，保留双方需要的工作，再标记解决。高级历史操作不属于日常必做步骤。')
         text.setReadOnly(True);layout.addWidget(text,1);row=QHBoxLayout();layout.addLayout(row)
         def download():d.accept();self.clone_repo()
         def existing():d.accept();self.add_repo(QFileDialog.getExistingDirectory(self,'选择已有游戏项目'))
         self.button(row,'下载团队项目',download);self.button(row,'添加已有项目',existing);self.button(row,'明白了',d.accept);d.exec();d.deleteLater()
     def help(self):
-        self.show_text('LXGit 游戏协作 0.0.8\n\n添加仓库 → 设置提交者 → 选择改动 → 暂存 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n首次打开会自动准备工具私有 Git，可取消并重试；也可在设置中手动选择 Git。完整功能与验证范围见工具目录 README.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
+        self.show_text('LXGit 游戏协作\n\n添加仓库 → 设置提交者 → 右键文件 → 加入本次提交 → 填写说明 → 提交 → 推送。\nGitHub 登录通过 Git Credential Manager，工具不保存令牌。\n冲突文件可手动编辑后暂存，或在文件菜单选择一方；随后在分支菜单继续。\n部分暂存支持逐行勾选文本修改。\n所有用户操作和错误记录在本次面板的操作记录中。\n\n首次打开会自动准备工具私有 Git，可取消并重试；也可在设置中手动选择 Git。完整功能与验证范围见工具目录 README.md。\n历史整理支持压缩和编号重排；暂不支持拖动重排。Enterprise、组织和签名功能需要对应环境验收。')
     def shutdown(self):
         if self.closed:return
-        self.closed=True;self.timer.stop()
+        self.closed=True;self.timer.stop();self.runtime_timer.stop()
         if self.proc:
             self.proc.blockSignals(True)
             if self.after and self.after[0]=='prepare_git':self.proc.write(b'c');self.proc.waitForFinished(2000)
