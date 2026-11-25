@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButto
     QMessageBox,QMenu,QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QProgressBar,
     QSizePolicy,QScrollArea,QGridLayout)
 
+ANIMATION_TOOL='repo-1433389279'
+
 STYLE='''
 QWidget#LXGit { background:#f7faf3; color:#243227; font-family:"Microsoft YaHei UI"; font-size:13px; }
 QWidget#LXGit QWidget {background:#f7faf3; color:#243227; font-family:"Microsoft YaHei UI"; font-size:13px;}
@@ -65,6 +67,7 @@ class Panel(QWidget):
         self.header_bar=QWidget();bar=QHBoxLayout(self.header_bar);bar.setContentsMargins(0,0,0,0);bar.setSpacing(6)
         self.repositories=QComboBox();self.repositories.setMinimumWidth(80);self.repositories.setMinimumContentsLength(4)
         self.repositories.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed);self.repositories.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.animation_repo=None
         self.repositories.setToolTip('选择当前游戏项目；添加和下载项目请打开右侧“项目”')
         for p in self.settings.get('repositories',[]):
             self.repositories.addItem(Path(p).name,p);self.repositories.setItemData(self.repositories.count()-1,p,Qt.ToolTipRole)
@@ -125,6 +128,73 @@ class Panel(QWidget):
         if self.repositories.count():
             index=self.repositories.findData(self.settings.get('last_repo'));self.repositories.setCurrentIndex(max(index,0));self.repo=self.repositories.currentData();QTimer.singleShot(0,self.refresh)
         QTimer.singleShot(0,self.prepare_git)
+    def showEvent(self,event):
+        super().showEvent(event)
+        self.sync_animation_library()
+
+    def sync_animation_library(self):
+        if self.repository_busy():
+            return
+        read_setting=getattr(self.context,'workspace_state',{}).get('installed_tool_setting')
+        path=read_setting(ANIMATION_TOOL,'library') if callable(read_setting) else None
+        try:
+            root=Path(path).resolve() if isinstance(path,str) and path else None
+            marker=root/'.git' if root else None
+            current=str(root) if marker and (marker.is_dir() or marker.is_file()) else None
+        except (OSError,ValueError,RuntimeError):
+            current=None
+        if current==self.animation_repo:
+            return
+        previous=self.animation_repo
+        self.animation_repo=current
+        saved=self.settings.get('repositories',[])
+        was_connected=bool(previous and self.repo==previous)
+        blocked=self.repositories.blockSignals(True)
+        try:
+            index=self.repositories.findData(previous)
+            if previous and previous not in saved and index>=0:
+                self.repositories.removeItem(index)
+            index=self.repositories.findData(current)
+            if current and index<0:
+                self.repositories.addItem('动画资产库',current)
+                index=self.repositories.count()-1
+                self.repositories.setItemData(index,current,Qt.ToolTipRole)
+            if current and (not self.repo or was_connected or self.settings.get('last_repo')==current):
+                self.repositories.setCurrentIndex(index)
+        finally:
+            self.repositories.blockSignals(blocked)
+        if self.repositories.currentData()!=self.repo:
+            self.select_repo()
+
+    def open_animation_library(self):
+        self.sync_animation_library()
+        if self.repository_busy() and (not self.animation_repo or self.repo!=self.animation_repo):
+            self.status.setText('上一项 Git 操作还在进行，请稍后再打开动画资产库。')
+            return
+        if not self.animation_repo:
+            self.status.setText('请先在 LXMaxAnimation 的共享库设置中连接本地 Git 资产库。')
+            return
+        self.tabs.setCurrentWidget(self.changes_page)
+        index=self.repositories.findData(self.animation_repo)
+        if self.repositories.currentIndex()!=index:
+            self.repositories.setCurrentIndex(index)
+        elif not self.proc:
+            self.refresh()
+
+    def open_animation_tool(self):
+        if self.repository_busy():
+            self.status.setText('上一项 Git 操作还在进行，请稍候。');return
+        try:
+            target=self.context.workspace_state['open_tool'](ANIMATION_TOOL)
+            refresh=getattr(target,'refresh_linked_library',None)
+            if callable(refresh):
+                target.guard(refresh)
+        except ValueError as error:
+            self.status.setText(str(error))
+
+    def repository_busy(self):
+        return (self.proc and self.git_ready) or (self.git_pending and self.git_pending[0]!='snapshot')
+
     def resizeEvent(self,event):
         super().resizeEvent(event)
         if not hasattr(self,'changes_page'):return
@@ -245,9 +315,12 @@ class Panel(QWidget):
         try:d.exec()
         finally:d.deleteLater()
     def project_panel(self):
+        current=[('打开项目文件夹',lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(self.repo))),('刷新本地改动',self.refresh),('项目配置与高级操作…',self.repo_menu)]
+        if self.animation_repo and callable(getattr(self.context,'workspace_state',{}).get('open_tool')):
+            current.append(('打开 LXMaxAnimation',self.open_animation_tool))
         self.actions_panel('项目管理',[
             ('加入或创建项目',[('下载团队项目…',self.clone_repo),('添加已有项目…',lambda:self.add_repo(QFileDialog.getExistingDirectory(self,'选择已有游戏项目'))),('为本地项目建立版本管理…',self.create_repo)]),
-            ('当前项目',[('打开项目文件夹',lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(self.repo))),('刷新本地改动',self.refresh),('项目配置与高级操作…',self.repo_menu)])],self.repo or '先加入团队项目，再开始保存版本。')
+            ('当前项目',current)],self.repo or '先加入团队项目，再开始保存版本。')
     def branch_panel(self):
         d=self.dialog('分支管理',540,340);layout=QVBoxLayout(d)
         label=ElidedLabel('当前分支：'+self.state.get('branch','尚未选择项目'));layout.addWidget(label)
@@ -319,6 +392,11 @@ class Panel(QWidget):
         self.settings['last_repo']=self.repo;self.context.save_settings(self.settings)
     def run(self,op,args=None,callback=None,refresh=True):
         if self.closed:return
+        if self.animation_repo and self.repo==self.animation_repo:
+            marker=Path(self.repo)/'.git'
+            if not (marker.is_dir() or marker.is_file()):
+                self.status.setText('动画资产库的 Git 工作区已不可用，请检查共享库设置。')
+                return
         if not self.git_ready:
             self.git_pending=(op,args,callback,refresh);self.prepare_git();self.status.setText('准备 Git 后继续操作…');return
         if self.proc:
@@ -366,7 +444,11 @@ class Panel(QWidget):
     def refresh(self):
         if self.repo:self.run('snapshot',callback=self.render,refresh=False)
     def render(self,state):
-        self.state=state;self.repo=str(Path(state['root']).resolve());self.summary.setText(f"{state['branch']}  ·  待推送 {state['ahead']}  /  待拉取 {state['behind']}  ·  {len(state['files'])} 个改动")
+        resolved=str(Path(state['root']).resolve())
+        if self.animation_repo and self.repo==self.animation_repo and resolved!=self.repo:
+            self.status.setText('动画资产库目录与 Git 工作区根目录不一致。')
+            return
+        self.state=state;self.repo=resolved;self.summary.setText(f"{state['branch']}  ·  待推送 {state['ahead']}  /  待拉取 {state['behind']}  ·  {len(state['files'])} 个改动")
         self.summary.setToolTip(self.repo+'\n'+self.summary.text()+'\n'+state['remotes']);self.repositories.setToolTip(self.repo);self.branch_button.setToolTip('当前分支：'+state['branch']);self.branches.clear();self.branches.addItems(state['branches'])
         self.branches.setCurrentText(state['branch']);self.operation.setText('当前有未完成的'+ ' / '.join({'merge':'合并','rebase':'变基','cherry-pick':'拣选','revert':'反向提交'}.get(x,x) for x in state['operations'])+'。请解决冲突后在“分支”菜单继续或中止。' if state['operations'] else '')
         self.operation.setVisible(bool(state['operations']))
@@ -378,16 +460,22 @@ class Panel(QWidget):
         self.files.blockSignals(False);self.filter_files();self.stashes.clear();self.stashes.addItems(state['stashes'])
         if self.tabs.currentWidget() is self.history_page:self.load_history()
     def select_repo(self):
-        if self.proc:
+        if self.repository_busy():
             self.repositories.blockSignals(True);self.repositories.setCurrentIndex(self.repositories.findData(self.repo));self.repositories.blockSignals(False);return
         self.repo=self.repositories.currentData() or '';self.diff.clear();self.history.clear();self.commit_diff.clear();self.save()
+        self.git_pending=None;self.state={};self.files.clear();self.branches.clear();self.stashes.clear();self.operation.clear();self.operation.hide()
         if not self.repo:
-            self.state={};self.files.clear();self.branches.clear();self.stashes.clear();self.operation.clear();self.operation.hide();self.summary.setText('从队友的 GitHub 地址下载游戏项目，或添加电脑上已有的项目。')
-        else:self.refresh()
+            self.summary.setText('从队友的 GitHub 地址下载游戏项目，或添加电脑上已有的项目。')
+        else:
+            self.summary.setText('正在读取项目改动…');self.refresh()
     def add_repo(self,path):
+        if self.repository_busy():
+            self.status.setText('上一项 Git 操作还在进行，请稍候。');return
         if path:
             path=str(Path(path).resolve());repos=self.settings.setdefault('repositories',[])
-            if path not in repos:repos.append(path);self.repositories.addItem(Path(path).name,path);self.repositories.setItemData(self.repositories.count()-1,path,Qt.ToolTipRole)
+            if path not in repos:repos.append(path)
+            if self.repositories.findData(path)<0:
+                self.repositories.addItem(Path(path).name,path);self.repositories.setItemData(self.repositories.count()-1,path,Qt.ToolTipRole)
             self.repositories.setCurrentIndex(self.repositories.findData(path));self.repo=path;self.save();self.refresh()
     def repo_menu(self):
         self.menu([('项目信息',None),('提交者姓名和邮箱…',self.identity),('远程地址…',self.remote),('添加忽略规则…',self.ignore),
@@ -407,6 +495,8 @@ class Panel(QWidget):
         target=str(Path(parent)/name);self.run('clone',{'url':url,'path':target},lambda _:self.add_repo(target))
     def remove_repo(self):
         if self.proc:return
+        if self.repo==self.animation_repo:
+            self.status.setText('动画资产库由 LXMaxAnimation 的共享库设置管理。');return
         repos=self.settings.get('repositories',[])
         if self.repo in repos:repos.remove(self.repo)
         self.repositories.removeItem(self.repositories.currentIndex());self.save()
@@ -458,6 +548,9 @@ class Panel(QWidget):
         if not item:return
         f=item.data(Qt.UserRole);path=f['path']
         entries=[('打开文件',lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.repo)/path)))),('查看此文件历史',lambda:self.run('file_history',{'path':path},self.show_text,False)),('图片前后对比',lambda:self.run('image_diff',{'path':path},self.image_dialog,False)),('丢弃未暂存修改…',lambda:self.discard(path))]
+        folder=Path(self.repo,path).parent
+        if folder.is_dir():
+            entries.insert(1,('打开所在文件夹',lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))))
         if f['conflict']:
             entries.extend([('解决冲突：采用当前一方…',lambda:self.resolve(path,'ours')),('解决冲突：采用传入一方…',lambda:self.resolve(path,'theirs')),('已手动解决，标记完成',lambda:self.run('stage',{'paths':[path]}))])
         self.menu(entries)

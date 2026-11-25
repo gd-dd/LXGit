@@ -3,7 +3,7 @@
   "kind": "lx-tool",
   "name": "LXGit 游戏协作",
   "description": "给中文游戏开发团队的版本管理工具：下载团队项目、查看修改、保存版本、同步给队友。",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "category": "开发工具",
   "icon": ".lxtool/icon.png",
   "readme": ".lxtool/README.md",
@@ -14,10 +14,10 @@
     ".lxtool/icon.png": "d4255c3399e43245cd74ea5992afdcf83ffc1dda0c4a9a1dc01f4dea1792e703",
     ".lxtool/README.md": "c70a7fde1e7f39cffb1dc905e458ad481fa1214d3bfea592d44a6b493bd91429",
     ".lxtool/panel.json": "33c566bd351e31a0078b96a2992f97dda29f174cad1526590c94b293fd2e993f",
-    "ui/panel.py": "7e3bd9da1db9914480a50a57c5ee0149e71fcfc7361a8e8120d62bc5aa95a223",
+    "ui/panel.py": "d10a4471c765ec2328625a6fa44a9c540464ad7cac1c75d385b9cf7d80e38a65",
     "ui/runtime_paths.py": "6ccc3db64953022f01e58136c4779f2c092cafbe567b3c1503af507952d6c547",
     "backend/git_runtime.py": "38af520aa17df3c354e8584d06d5f65355296260517e0f2aec1c4c1bbf11e7f5",
     "bin/LXGit-worker.exe": "39a7decacd67f2d54e5ab663631f2397dc790663d8ed0e6121e344819dc90951"
   },
-  "releaseNotes": "加宽工作区和历史页分隔条，并增强默认对比度与鼠标悬停提示。仓库操作和私有 Git 运行时沿用上一版。"
+  "releaseNotes": "LXGit 与 LXMaxAnimation 共用本地 Git 资产库，支持双向打开与文件版本操作。完整联动需 LXTools 0.0.10 或更高版本。"
 }
