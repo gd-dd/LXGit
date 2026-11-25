@@ -392,6 +392,11 @@ class Panel(QWidget):
         self.settings['last_repo']=self.repo;self.context.save_settings(self.settings)
     def run(self,op,args=None,callback=None,refresh=True):
         if self.closed:return
+        workspace=getattr(self.context,'workspace_state',{})
+        if self.repo and workspace.get('animation_working_root')==self.repo:
+            if op!='snapshot':
+                self.status.setText('LXMaxAnimation 正在同步同一个库，完成后再试。')
+            return
         if self.animation_repo and self.repo==self.animation_repo:
             marker=Path(self.repo)/'.git'
             if not (marker.is_dir() or marker.is_file()):
@@ -412,6 +417,14 @@ class Panel(QWidget):
             self.start_error(p,error);return
         p.finished.connect(self.finished);p.errorOccurred.connect(self.failed)
         p.started.connect(lambda:(p.write(json.dumps(request,ensure_ascii=False).encode('utf-8')),p.closeWriteChannel()))
+        if self.repo and op not in ('snapshot','history','diff','show'):
+            root=self.repo
+            workspace['lxgit_working_root']=root
+            def release(*_):
+                if workspace.get('lxgit_working_root')==root:
+                    workspace.pop('lxgit_working_root',None)
+            p.finished.connect(release)
+            p.errorOccurred.connect(release)
         p.start()
     def failed(self,error):
         if self.closed:return
