@@ -40,6 +40,8 @@ BRANCH = 'feature/' + '角色移动与多人联机同步功能开发_' * 6
 FILE = 'Assets/游戏资源/角色/主角/' + '超长中文模型贴图与场景文件名_' * 7 + '.prefab'
 READY_FILE = 'Assets/游戏资源/准备提交.cs'
 REMOTE_FILE = 'Assets/游戏资源/远端版本.txt'
+SHARED_FILE = 'Assets/游戏资源/共同文件.txt'
+OLDER_FILE = 'Assets/游戏资源/待更新文件.txt'
 REMOTE_COMMIT = 'a' * 40
 ERROR = ('Git 下载连接中断，无法连接服务器。请检查网络后点击“准备 / 重试”。' * 5
          + 'https://github.com/git-for-windows/git/releases/download/PortableGit.7z.exe')
@@ -138,7 +140,8 @@ class LayoutFixture:
             raise AssertionError('Real NativePanelHandle failed to construct fixture: ' + error)
         self.handle = handle
         self.panel = handle.widget
-        self.local_paths = (FILE, READY_FILE)
+        self.local_paths = (FILE, READY_FILE, SHARED_FILE, OLDER_FILE)
+        self.remote_paths = (REMOTE_FILE, SHARED_FILE, OLDER_FILE)
         self.panel.run = Mock(name='no_worker_or_repo_operations', side_effect=self.fixture_worker)
         self.panel.warn = Mock(side_effect=AssertionError('Unexpected modal in layout QA'))
         self.panel.timer.stop()
@@ -177,21 +180,31 @@ class LayoutFixture:
         if operation not in ('tree', 'workspace_tree'):
             return
         args = args or {}
-        side, path = args['side'], args.get('path', '')
-        paths = self.local_paths if side == 'local' else (REMOTE_FILE,)
-        prefix = path + '/' if path else ''
-        entries = {}
-        for candidate in paths:
-            if not candidate.startswith(prefix):
-                continue
-            name, separator, _ = candidate[len(prefix):].partition('/')
-            entries[name] = {'name': name, 'path': prefix + name,
-                             'kind': 'directory' if separator else 'file'}
+        side = args['side']
+        paths = self.local_paths if side == 'local' else self.remote_paths
+        def listing(path):
+            prefix = path + '/' if path else ''
+            entries = {}
+            for candidate in paths:
+                if not candidate.startswith(prefix):
+                    continue
+                name, separator, _ = candidate[len(prefix):].partition('/')
+                entries[name] = {'name': name, 'path': prefix + name,
+                                 'kind': 'directory' if separator else 'file'}
+            return {'side': side, 'path': path, 'entries': list(entries.values()),
+                    'ref': 'origin/main' if side == 'remote' else '', 'commit': args.get('commit', '')}
         if callback:
-            callback({'side': side, 'path': path, 'entries': list(entries.values()),
-                      'ref': 'origin/main' if side == 'remote' else '',
-                      'commit': REMOTE_COMMIT if side == 'remote' else ''})
+            callback([listing(path) for path in args['paths']] if 'paths' in args else listing(args.get('path', '')))
         QTimer.singleShot(0, self.panel.load_next_directory)
+
+    def select_directory(self, side):
+        selector = self.panel.directory_mode
+        selector.setCurrentIndex(selector.findData(side))
+        drain(self.app)
+
+    def directory_reads(self):
+        return [call.args[1] for call in self.panel.run.call_args_list
+                if call.args[0] in ('tree', 'workspace_tree')]
 
     def change_item(self, path=FILE):
         files = self.panel.files
@@ -210,6 +223,9 @@ class LayoutFixture:
                   'files': [{'status': ' M', 'path': FILE, 'old': '', 'conflict': False},
                             {'status': 'M ', 'path': READY_FILE, 'old': '', 'conflict': False}],
                   'remoteTree': {'ref': 'origin/main', 'commit': REMOTE_COMMIT},
+                  'comparison': {'key': ['b' * 40, REMOTE_COMMIT], 'comparable': True,
+                                 'incoming': [OLDER_FILE, REMOTE_FILE], 'outgoing': [],
+                                 'different': [OLDER_FILE, REMOTE_FILE]},
                   'ahead': 32, 'behind': 7, 'operations': [], 'remotes': 'origin https://github.com/fixture/game.git',
                   'stashes': [], 'upstream': 'origin/main', 'tags': []})
         p.message.setText('修复角色跳跃并同步第一关场景')
@@ -232,8 +248,8 @@ class LayoutFixture:
         p = self.panel
         widgets = {n: getattr(p, n, None) for n in (
             'repositories', 'branches', 'summary', 'runtime_label', 'runtime_box',
-            'header_bar', 'repo_bar', 'sync_bar', 'tabs', 'files', 'remote_tree', 'local_tree',
-            'message', 'commit_button', 'commit_actions', 'workspace_split', 'directory_split', 'history_split',
+            'header_bar', 'repo_bar', 'sync_bar', 'tabs', 'files', 'directories', 'directory_mode', 'directory_location',
+            'message', 'commit_button', 'commit_actions', 'workspace_split', 'history_split',
             'status', 'environment_status')}
         geometry = {name: [self.rect(w).x(), self.rect(w).y(), w.width(), w.height()]
                     for name, w in widgets.items() if isinstance(w, QWidget)}
@@ -262,12 +278,16 @@ class LayoutFixture:
                                           for child in p.changes_page.findChildren(QPlainTextEdit)),
                   'splitters': [{'sizes': s.sizes(), 'childrenCollapsible': s.childrenCollapsible()} for s in p.findChildren(QSplitter)],
                   'sourceSha256': hashlib.sha256((self.package / 'ui/panel.py').read_bytes()).hexdigest()}
+        result['directoryMode'] = p.directory_mode.currentText()
+        result['visibleDirectoryTrees'] = [side for side, tree in p.trees.items() if tree.isVisible()]
         result['visibleViewports'] = {}
-        for name in ('remote_tree', 'local_tree', 'files'):
-            viewport = getattr(p, name).viewport()
+        for name, view in (('directory', p.directories.currentWidget()), ('files', p.files)):
+            viewport = view.viewport()
             visible = self.visible_rect(viewport)
             result['visibleViewports'][name] = {'widgetSize': [viewport.width(), viewport.height()],
                                                'clippedVisibleSize': [visible.width(), visible.height()]}
+        result['directorySelectorVisibleSize'] = [self.visible_rect(p.directory_mode).width(),
+                                                  self.visible_rect(p.directory_mode).height()]
         result['commitVisibleSize'] = [self.visible_rect(p.commit_button).width(), self.visible_rect(p.commit_button).height()]
         if hasattr(p, 'environment_status'):
             visible = self.visible_rect(p.environment_status)
@@ -405,6 +425,8 @@ class PanelLayoutTests(unittest.TestCase):
         self.assertEqual(result['actualLogical'], [1280, 720])
         self.assertTrue(result['containsCommit'])
         self.assertTrue(result['noInlineDiff'])
+        self.assertEqual(result['directoryMode'], '本地目录')
+        self.assertEqual(result['visibleDirectoryTrees'], ['local'])
         self.assertGreaterEqual(self.panel.files.height(), 160)
         for item in result['visibleViewports'].values():
             self.assertGreaterEqual(min(item['clippedVisibleSize']), 100)
@@ -432,7 +454,7 @@ class PanelLayoutTests(unittest.TestCase):
 
     def test_workspace_and_history_splitters_are_user_adjustable(self):
         self.fixture.long_content()
-        for index, name in ((0, 'workspace_split'), (0, 'directory_split'), (1, 'history_split')):
+        for index, name in ((0, 'workspace_split'), (1, 'history_split')):
             self.panel.tabs.setCurrentIndex(index)
             drain(self.app)
             splitter = getattr(self.panel, name)
@@ -514,7 +536,11 @@ class PanelLayoutTests(unittest.TestCase):
     def test_expanding_directories_reads_local_and_pinned_remote_independently(self):
         self.fixture.long_content()
         p = self.panel
+        self.assertEqual(self.fixture.directory_reads(), [{'side': 'local', 'path': ''}])
+        self.assertEqual(p.remote_tree.topLevelItemCount(), 0)
         for side in ('local', 'remote'):
+            self.fixture.select_directory(side)
+            self.assertEqual(self.fixture.snapshot()['visibleDirectoryTrees'], [side])
             for directory in ('Assets', 'Assets/游戏资源'):
                 item = p.directory_item(side, directory)
                 self.assertIsNotNone(item, (side, directory))
@@ -525,15 +551,66 @@ class PanelLayoutTests(unittest.TestCase):
         remote_asset = p.directory_item('remote', REMOTE_FILE)
         self.assertIsNotNone(remote_asset)
         self.assertIsNone(p.directory_item('local', REMOTE_FILE))
-        remote_reads = [call.args[1] for call in p.run.call_args_list
-                        if call.args[0] in ('tree', 'workspace_tree') and call.args[1]['side'] == 'remote']
+        remote_reads = [args for args in self.fixture.directory_reads() if args['side'] == 'remote']
         self.assertTrue(any(read['path'] == 'Assets/游戏资源' for read in remote_reads))
         self.assertTrue(all(read.get('commit') == REMOTE_COMMIT for read in remote_reads))
+        self.assertEqual(p.directory_location.toolTip(), 'origin/main')
+        self.assertEqual(p.directory_item('local', READY_FILE).text(1), '已修改')
+        self.assertEqual(p.directory_item('local', OLDER_FILE).text(1), '旧版本')
+        self.assertEqual(p.directory_item('local', SHARED_FILE).text(1), '最新')
+        self.assertEqual(p.directory_item('remote', OLDER_FILE).text(1), '有更新')
+        self.assertEqual(p.directory_item('remote', SHARED_FILE).text(1), '最新')
+        self.assertEqual(p.directory_item('local', 'Assets').text(1), '有变更')
         menu = self.fixture.open_and_close_menu(lambda: p.tree_menu(
             'remote', p.remote_tree.visualItemRect(remote_asset).center()), '与本地提交比较')
         self.assertFalse(any('加入本次提交' in title for title in menu))
         self.assertEqual(p.run.call_args.args[:2], ('workspace_diff', {
             'path': REMOTE_FILE, 'commit': REMOTE_COMMIT}))
+
+    def test_loaded_directories_are_reused_until_their_snapshot_changes(self):
+        self.fixture.long_content()
+        p = self.panel
+        self.fixture.select_directory('remote')
+        assets = p.directory_item('remote', 'Assets')
+        assets.setExpanded(True)
+        drain(self.app)
+        nested = p.directory_item('remote', 'Assets/游戏资源')
+        nested.setExpanded(True)
+        drain(self.app)
+        p.run.reset_mock()
+        nested.setExpanded(False)
+        nested.setExpanded(True)
+        self.fixture.select_directory('local')
+        self.fixture.select_directory('remote')
+        self.assertEqual(self.fixture.directory_reads(), [])
+
+        self.fixture.select_directory('local')
+        commit = 'd' * 40
+        incoming = 'Assets/游戏资源/新版文件.txt'
+        self.fixture.remote_paths += (incoming,)
+        p.render(dict(p.state, remoteTree={'ref': 'origin/main', 'commit': commit}))
+        drain(self.app)
+        self.assertEqual(self.fixture.directory_reads(), [])
+        self.fixture.select_directory('remote')
+        self.assertEqual(self.fixture.directory_reads(), [{
+            'side': 'remote', 'path': '', 'paths': ['', 'Assets', 'Assets/游戏资源'], 'commit': commit}])
+        self.assertIs(p.directory_item('remote', 'Assets/游戏资源'), nested)
+        self.assertTrue(nested.isExpanded())
+        self.assertIsNotNone(p.directory_item('remote', incoming))
+
+    def test_cached_remote_removal_relabels_visible_local_files(self):
+        self.fixture.long_content()
+        p = self.panel
+        for path in ('Assets', 'Assets/游戏资源'):
+            p.directory_item('local', path).setExpanded(True)
+            drain(self.app)
+        shared = p.directory_item('local', SHARED_FILE)
+        self.assertEqual(shared.text(1), '最新')
+        p.render(dict(p.state, remoteTree={'ref': '', 'commit': ''}, comparison={
+            'key': ['b' * 40, ''], 'comparable': False, 'incoming': [], 'outgoing': [], 'different': []}))
+        drain(self.app)
+        self.assertEqual(shared.text(1), '未获取远端')
+        self.assertEqual(p.directory_item('local', READY_FILE).text(1), '已修改')
 
     def test_secondary_panels_fit_and_return_reusable_widgets(self):
         self.fixture.long_content()
@@ -584,19 +661,28 @@ class PanelLayoutTests(unittest.TestCase):
         self.fixture = LayoutFixture(width=853, height=480, force_viewport=True)
         self.panel = self.fixture.panel
         self.fixture.long_content()
-        for ready in (True, False):
-            self.fixture.set_runtime(ready)
-            result = self.fixture.snapshot()
-            with self.subTest(ready=ready):
-                self.assertEqual(result['actualLogical'], [853, 480])
-                for name, item in result['visibleViewports'].items():
-                    self.assertGreaterEqual(item['clippedVisibleSize'][0], 80)
-                    self.assertGreaterEqual(item['clippedVisibleSize'][1],
-                                            80 if name == 'files' else 36, name)
-                self.assertEqual(result['commitVisibleSize'],
-                                 [self.panel.commit_button.width(), self.panel.commit_button.height()])
-                self.assertEqual(result['environmentVisibleSize'],
-                                 [self.panel.environment_status.width(), self.panel.environment_status.height()])
+        for side in ('local', 'remote'):
+            self.fixture.select_directory(side)
+            for ready in (True, False):
+                self.fixture.set_runtime(ready)
+                with self.subTest(side=side, ready=ready):
+                    self.assert_compact_workspace(side)
+
+    def assert_compact_workspace(self, side):
+        p = self.panel
+        result = self.fixture.snapshot()
+        self.assertEqual(result['actualLogical'], [853, 480])
+        self.assertEqual(result['visibleDirectoryTrees'], [side])
+        for name, item in result['visibleViewports'].items():
+            self.assertGreaterEqual(item['clippedVisibleSize'][0], 140, name)
+            self.assertGreaterEqual(item['clippedVisibleSize'][1], 80, name)
+        self.assertEqual(result['directorySelectorVisibleSize'],
+                         [p.directory_mode.width(), p.directory_mode.height()])
+        tree = p.directories.currentWidget()
+        self.assertEqual(tree.headerItem().text(1), '状态')
+        self.assertLessEqual(tree.columnViewportPosition(1) + tree.columnWidth(1), tree.viewport().width())
+        self.assertEqual(result['commitVisibleSize'], [p.commit_button.width(), p.commit_button.height()])
+        self.assertEqual(result['environmentVisibleSize'], [p.environment_status.width(), p.environment_status.height()])
 
     def test_environment_status_is_fully_visible_in_ready_and_error_states(self):
         for ready, text in ((True, 'Git 已就绪'), (False, 'Git 尚未就绪')):
@@ -618,24 +704,19 @@ class PanelLayoutTests(unittest.TestCase):
                 self.fixture.window.resize(853, 480)
                 self.fixture.requested = (853, 480)
                 drain(self.app)
-            for ready in (True, False):
-                self.fixture.set_runtime(ready)
-                result = self.fixture.snapshot()
-                with self.subTest(first=first, ready=ready):
-                    self.assertEqual(result['actualLogical'], [853, 480])
-                    self.assertGreater(self.fixture.window.maximumWidth(), 853)
-                    self.assertGreater(self.fixture.window.maximumHeight(), 480)
-                    ancestor = self.panel
-                    while ancestor is not None:
-                        layout = QWidget.layout(ancestor)
-                        if layout: self.assertNotEqual(layout.sizeConstraint(), QLayout.SetNoConstraint)
-                        ancestor = ancestor.parentWidget()
-                    for name, item in result['visibleViewports'].items():
-                        self.assertGreaterEqual(item['clippedVisibleSize'][0], 80)
-                        self.assertGreaterEqual(item['clippedVisibleSize'][1],
-                                                80 if name == 'files' else 36, name)
-                    self.assertEqual(result['commitVisibleSize'], [self.panel.commit_button.width(), self.panel.commit_button.height()])
-                    self.assertEqual(result['environmentVisibleSize'], [self.panel.environment_status.width(), self.panel.environment_status.height()])
+            for side in ('local', 'remote'):
+                self.fixture.select_directory(side)
+                for ready in (True, False):
+                    self.fixture.set_runtime(ready)
+                    with self.subTest(first=first, side=side, ready=ready):
+                        self.assert_compact_workspace(side)
+                        self.assertGreater(self.fixture.window.maximumWidth(), 853)
+                        self.assertGreater(self.fixture.window.maximumHeight(), 480)
+                        ancestor = self.panel
+                        while ancestor is not None:
+                            layout = QWidget.layout(ancestor)
+                            if layout: self.assertNotEqual(layout.sizeConstraint(), QLayout.SetNoConstraint)
+                            ancestor = ancestor.parentWidget()
             if first == (853, 480): self.fixture.close()
 
     def test_secondary_dialogs_do_not_accumulate_over_six_cycles(self):

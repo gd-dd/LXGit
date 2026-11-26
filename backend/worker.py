@@ -120,7 +120,29 @@ class Git:
         if verified!=commit:
             raise GitError('本地缺少此远端版本，请检查远端更新。')
         return verified
-    def snapshot(self):
+    def file_comparison(self, head, remote, known):
+        cloud=remote['commit']
+        key=[head,cloud]
+        if key==known:
+            return None
+        comparison=dict(key=key,comparable=False,incoming=[],outgoing=[],different=[])
+        if not head or not cloud:
+            return comparison
+        base=self.run('merge-base',head,cloud,check=False,extra_env=LOCAL_OBJECTS) if head!=cloud else head
+        if not base:
+            return comparison
+        def paths(first,second):
+            if first==second:
+                return []
+            raw=self.run('diff','--no-ext-diff','--no-textconv','--no-renames','--name-only','-z',
+                         first,second,'--',raw=True,extra_env=LOCAL_OBJECTS)
+            return [name for name in raw.decode('utf-8','replace').split('\0') if name]
+        incoming=paths(base,cloud)
+        outgoing=paths(base,head)
+        different=paths(head,cloud) if incoming and outgoing else incoming or outgoing
+        return dict(key=key,comparable=True,incoming=incoming,outgoing=outgoing,different=different)
+
+    def snapshot(self, comparison_key=None):
         root=self.run('rev-parse','--show-toplevel')
         raw=self.run('status','--porcelain=v1','--untracked-files=all','-z',raw=True).decode('utf-8','replace').split('\0')
         files=[];i=0
@@ -141,10 +163,12 @@ class Git:
             q=Path(self.run('rev-parse','--git-path',path))
             if not q.is_absolute(): q=Path(self.repo)/q
             if q.exists() and name not in operations:operations.append(name)
+        remote_tree=self.remote_tree(branch)
         return dict(root=root,branch=branch or '分离头指针',head=head,files=files,branches=branches,upstream=upstream,
             ahead=int(counts[0]) if counts else 0,behind=int(counts[1]) if counts else 0,
             operations=operations,remotes=self.run('remote','-v'),tags=self.run('tag').splitlines(),
-            stashes=self.run('stash','list','--format=%gd%x09%gs').splitlines(),remoteTree=self.remote_tree(branch))
+            stashes=self.run('stash','list','--format=%gd%x09%gs').splitlines(),remoteTree=remote_tree,
+            comparison=self.file_comparison(head,remote_tree,comparison_key))
 
 
 def local_workspace_entries(g,path):
@@ -195,22 +219,34 @@ def remote_workspace_entries(g,path,commit):
 
 
 def workspace_tree(g,args):
-    path=workspace_path(args.get('path',''),allow_root=True)
     side=args.get('side')
     identity={'ref':'','commit':''}
-    if side=='local':
-        entries=local_workspace_entries(g,path)
-    elif side=='remote':
-        identity=g.remote_tree()
+    if side=='remote':
         if args.get('commit'):
-            commit=g.local_commit(args['commit'])
-            if identity['commit']!=commit:
-                identity={'ref':'','commit':commit}
-        entries=remote_workspace_entries(g,path,identity['commit']) if identity['commit'] else []
-    else:
-        raise GitError('请选择本地或远端目录。')
-    entries.sort(key=lambda entry:(entry['kind']!='directory',entry['name'].casefold(),entry['name']))
-    return dict(entries=entries,path=path,side=side,**identity)
+            identity={'ref':'','commit':g.local_commit(args['commit'])}
+        else:
+            identity=g.remote_tree()
+    elif side!='local':
+        raise GitError('目录来源无效。')
+    paths=args.get('paths')
+    if paths is not None and (not isinstance(paths,list) or not 1<=len(paths)<=64):
+        raise GitError('一次最多刷新 64 个目录。')
+    requested=paths if paths is not None else [args.get('path','')]
+    result=[]
+    for value in requested:
+        path=workspace_path(value,allow_root=True)
+        try:
+            if side=='local':
+                entries=local_workspace_entries(g,path)
+            else:
+                entries=remote_workspace_entries(g,path,identity['commit']) if identity['commit'] else []
+        except GitError:
+            if paths is None:
+                raise
+            entries=[]
+        entries.sort(key=lambda entry:(entry['kind']!='directory',entry['name'].casefold(),entry['name']))
+        result.append(dict(side=side,path=path,entries=entries,**identity))
+    return result if paths is not None else result[0]
 
 
 def github(g,endpoint,method='GET',body=None):
@@ -275,7 +311,7 @@ def dispatch(req):
         owner=a.get('owner','').strip()
         if owner and not re.fullmatch(r'[\w.-]+',owner):raise GitError('组织名称无效。')
         return github(g,'/orgs/'+owner+'/repos' if owner else '/user/repos','POST',{'name':name,'private':a.get('private',True),'description':a.get('description',''),'auto_init':False})
-    if op=='snapshot':return g.snapshot()
+    if op=='snapshot':return g.snapshot(a.get('comparison_key'))
     if op in ('tree','workspace_tree'):return workspace_tree(g,a)
     if op=='workspace_diff':
         commit=g.local_commit(a.get('commit'))

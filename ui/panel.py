@@ -9,7 +9,7 @@ from PySide6.QtGui import QDesktopServices,QPixmap,QFont,QSyntaxHighlighter,QTex
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,QLineEdit,
     QTextEdit,QPlainTextEdit,QListWidget,QListWidgetItem,QSplitter,QTabWidget,QFileDialog,QInputDialog,
     QMessageBox,QMenu,QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QProgressBar,
-    QSizePolicy,QScrollArea,QGridLayout,QTreeWidget,QTreeWidgetItem,QStyle,QApplication)
+    QSizePolicy,QScrollArea,QGridLayout,QTreeWidget,QTreeWidgetItem,QStyle,QApplication,QStackedWidget,QHeaderView)
 
 ANIMATION_TOOL='repo-1433389279'
 
@@ -97,40 +97,56 @@ class Panel(QWidget):
         self.tabs=QTabWidget();root.addWidget(self.tabs,1)
         changes=QWidget();cl=QVBoxLayout(changes);cl.setContentsMargins(6,6,6,6);cl.setSpacing(6)
         self.workspace_split=QSplitter();split=self.workspace_split;split.setChildrenCollapsible(False);split.setHandleWidth(8);cl.addWidget(split,1)
-        self.directory_split=QSplitter(Qt.Vertical)
-        self.directory_split.setChildrenCollapsible(False)
-        self.directory_split.setHandleWidth(6)
+        directory=QWidget()
+        column=QVBoxLayout(directory);column.setContentsMargins(0,0,0,0);column.setSpacing(4)
+        header=QHBoxLayout()
+        self.directory_mode=QComboBox()
+        self.directory_mode.setAccessibleName('切换目录来源')
+        self.directory_mode.addItem('本地目录','local')
+        self.directory_mode.addItem('远端目录','remote')
+        header.addWidget(self.directory_mode)
+        self.directory_location=ElidedLabel()
+        header.addWidget(self.directory_location,1)
+        self.button(header,'获取远端',lambda:self.run('fetch')).setToolTip('获取远端版本并刷新文件状态')
+        column.addLayout(header)
+        self.directories=QStackedWidget()
+        column.addWidget(self.directories,1)
         self.directory_requests={}
         self.directory_scan=False
+        self.directory_dirty=set()
+        self.loaded_directories={'local':set(),'remote':set()}
+        self.tree_locations={}
+        self.comparison={}
+        self.file_marks={}
+        self.folder_marks=set()
         self.local_signature=None
         self.remote_signature=None
         self.included_count=0
         self.trees={}
-        self.tree_labels={}
-        for side,title in (('remote','远端目录'),('local','本地目录')):
-            pane=QWidget()
-            column=QVBoxLayout(pane);column.setContentsMargins(0,0,0,0);column.setSpacing(4)
-            header=QHBoxLayout()
-            label=QLabel(title);label.setStyleSheet('font-weight:700')
-            header.addWidget(label)
-            location=ElidedLabel();header.addWidget(location,1)
-            if side=='remote':
-                self.button(header,'获取',lambda:self.run('fetch')).setToolTip('获取远端版本，刷新目录和待拉取状态')
-            column.addLayout(header)
+        self.directory_icons={}
+        for side,title in (('local','本地目录'),('remote','远端目录')):
             tree=QTreeWidget()
-            tree.setAccessibleName(title);tree.setHeaderHidden(True);tree.setUniformRowHeights(True);tree.setMinimumHeight(52)
-            tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            tree.setAccessibleName(title);tree.setUniformRowHeights(True);tree.setMinimumHeight(70)
+            tree.setColumnCount(2);tree.setHeaderLabels(['文件','状态'])
+            tree.header().setStretchLastSection(False)
+            tree.header().setSectionResizeMode(0,QHeaderView.Stretch)
+            tree.header().setSectionResizeMode(1,QHeaderView.Fixed)
+            tree.setColumnWidth(1,96)
+            tree.setIndentation(16)
+            tree.setStyleSheet('QTreeWidget::item {padding:0px; height:23px;} QHeaderView::section {padding:4px;}')
+            tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             tree.setContextMenuPolicy(Qt.CustomContextMenu)
             tree.customContextMenuRequested.connect(lambda pos,key=side:self.tree_menu(key,pos))
             tree.itemExpanded.connect(lambda item,key=side:self.expand_directory(key,item))
             tree.itemDoubleClicked.connect(lambda item,_,key=side:self.activate_tree_item(key,item))
-            column.addWidget(tree,1)
-            self.trees[side]=tree;self.tree_labels[side]=location
-            self.directory_split.addWidget(pane)
+            self.trees[side]=tree
+            self.directory_icons[side]={kind:tree.style().standardIcon(icon) for kind,icon in
+                                        (('directory',QStyle.SP_DirIcon),('file',QStyle.SP_FileIcon))}
+            self.directories.addWidget(tree)
         self.remote_tree=self.trees['remote'];self.local_tree=self.trees['local']
-        self.directory_split.setSizes([200,260])
+        self.directory_mode.currentIndexChanged.connect(self.switch_directory)
         self.clear_directories()
-        split.addWidget(self.directory_split)
+        split.addWidget(directory)
         right=QWidget();right.setMinimumWidth(250);rl=QVBoxLayout(right)
         rl.setContentsMargins(3,0,0,0);rl.setSpacing(5)
         filebar=QHBoxLayout();filebar.setSpacing(5)
@@ -142,6 +158,8 @@ class Panel(QWidget):
         self.files.setAccessibleName('改动列表');self.files.setMinimumSize(0,68)
         self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.files.setTextElideMode(Qt.ElideMiddle);self.files.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.files.setUniformItemSizes(True)
+        self.files.setStyleSheet('QListWidget::item {padding:1px 3px; height:23px;}')
         self.files.setContextMenuPolicy(Qt.CustomContextMenu);self.files.customContextMenuRequested.connect(self.changes_menu)
         rl.addWidget(self.files,1)
         self.change_summary=ElidedLabel('右键文件可选择要提交的改动')
@@ -175,7 +193,7 @@ class Panel(QWidget):
         self.repositories.currentIndexChanged.connect(self.select_repo)
         self.filter.textChanged.connect(self.filter_files);self.history.currentItemChanged.connect(self.show_commit);self.history_search.textChanged.connect(self.filter_history)
         self.tabs.currentChanged.connect(self.tab_changed)
-        self.timer=QTimer(self);self.timer.setInterval(15000);self.timer.timeout.connect(self.auto_refresh);self.timer.start()
+        self.timer=QTimer(self);self.timer.setInterval(30000);self.timer.timeout.connect(self.auto_refresh);self.timer.start()
         if self.repositories.count():
             index=self.repositories.findData(self.settings.get('last_repo'));self.repositories.setCurrentIndex(max(index,0));self.repo=self.repositories.currentData();QTimer.singleShot(0,self.refresh)
         QTimer.singleShot(0,self.prepare_git)
@@ -274,9 +292,10 @@ class Panel(QWidget):
         self.environment_status.setText('Git 已就绪' if ready else 'Git 尚未就绪')
         self.environment_status.setToolTip(self.runtime_label.text())
     def prepare_git(self):
-        if self.closed or self.proc:return
+        if self.closed:return
         if self.settings.get('git'):
             self.git_ready=True;self.runtime_label.setText('使用手动选择的 Git');self.runtime_progress.hide();self.runtime_view(True);return
+        if self.proc:return
         try:runtime_root(self.context.package_root)
         except Exception as error:
             self.runtime_label.setText(str(error));self.runtime_view();return
@@ -515,7 +534,7 @@ class Panel(QWidget):
             self.status.setText('操作未完成，详情见操作记录')
             self.log.appendPlainText('操作失败：'+result.get('error','未知错误'))
             if op=='tree':
-                QTimer.singleShot(0,self.load_next_directory)
+                self.directory_requests.clear()
                 return
             self.warn(result.get('error','未知错误'))
             if op not in ('snapshot','history','diff','show','file_history','workspace_diff'):
@@ -533,17 +552,24 @@ class Panel(QWidget):
             from PySide6.QtWidgets import QApplication
             if QApplication.activeModalWidget() is None:self.refresh()
     def refresh(self):
-        if self.repo:self.run('snapshot',callback=self.render,refresh=False)
+        if self.repo:self.run('snapshot',{'comparison_key':self.comparison.get('key')},self.render,False)
     def render(self,state):
         resolved=str(Path(state['root']).resolve())
         if self.animation_repo and self.repo==self.animation_repo and resolved!=self.repo:
             self.status.setText('动画资产库目录与 Git 工作区根目录不一致。')
             return
+        previous_files=self.state.get('files')
+        previous_comparison=self.comparison
+        if state.get('comparison') is not None:
+            self.comparison=state['comparison']
         self.state=state;self.repo=resolved;self.summary.setText(f"{state['branch']}  ·  待推送 {state['ahead']}  /  待拉取 {state['behind']}  ·  {len(state['files'])} 个改动")
         self.summary.setToolTip(self.repo+'\n'+self.summary.text()+'\n'+state['remotes']);self.repositories.setToolTip(self.repo);self.branch_button.setToolTip('当前分支：'+state['branch']);self.branches.clear();self.branches.addItems(state['branches'])
         self.branches.setCurrentText(state['branch']);self.operation.setText('当前有未完成的'+ ' / '.join({'merge':'合并','rebase':'变基','cherry-pick':'拣选','revert':'反向提交'}.get(x,x) for x in state['operations'])+'。请解决冲突后在“分支”菜单继续或中止。' if state['operations'] else '')
         self.operation.setVisible(bool(state['operations']))
-        self.render_changes()
+        if previous_files!=state['files']:
+            self.render_changes()
+        if previous_files!=state['files'] or previous_comparison!=self.comparison:
+            self.update_file_marks()
         self.stashes.clear();self.stashes.addItems(state['stashes'])
         self.refresh_directories()
         if self.tabs.currentWidget() is self.history_page:
@@ -590,37 +616,63 @@ class Panel(QWidget):
         repos=self.settings.get('repositories',[])
         if self.repo in repos:repos.remove(self.repo)
         self.repositories.removeItem(self.repositories.currentIndex());self.save()
+    def active_directory(self):
+        return self.directory_mode.currentData()
+
     def clear_directories(self):
         self.directory_requests.clear()
+        self.directory_dirty.clear()
         self.local_signature=self.remote_signature=None
-        for side,text in (('local','选择项目后显示工作区'),('remote','获取远端后显示目录')):
-            self.trees[side].clear()
-            self.tree_labels[side].setText(text)
+        self.comparison={}
+        self.file_marks={}
+        self.folder_marks=set()
+        self.tree_locations={'local':'选择项目后显示工作区','remote':'获取远端后显示目录'}
+        for side,tree in self.trees.items():
+            tree.clear()
+            self.loaded_directories[side].clear()
+        self.directory_location.setText(self.tree_locations[self.active_directory()])
 
     def refresh_workspace(self):
         self.directory_scan=True
         self.refresh()
 
+    def switch_directory(self,index):
+        self.directories.setCurrentIndex(index)
+        side=self.active_directory()
+        self.directory_location.setText(self.tree_locations.get(side,''))
+        self.queue_visible_directories(side)
+        self.load_next_directory()
+
+    def queue_visible_directories(self,side):
+        if side not in self.directory_dirty:
+            return
+        self.directory_dirty.remove(side)
+        commit=self.remote_signature if side=='remote' else ''
+        if side=='remote' and not commit:
+            return
+        self.loaded_directories[side].clear()
+        self.directory_requests[side,'']=commit
+        for path in self.expanded_directories(side):
+            self.directory_requests[side,path]=commit
+
     def refresh_directories(self):
         remote=self.state.get('remoteTree') or {}
         ref,commit=remote.get('ref'),remote.get('commit')
-        self.tree_labels['local'].setText(self.repo)
-        self.tree_labels['remote'].setText(ref if commit else '无远端快照 · 点击获取')
-        if commit and self.remote_signature!=commit:
-            self.directory_requests['remote','']=commit
-            for path in self.expanded_directories('remote'):
-                self.directory_requests['remote',path]=commit
-        elif not commit:
+        self.tree_locations={'local':self.repo,'remote':ref if commit else '尚未获取远端目录'}
+        visible=self.active_directory()
+        self.directory_location.setText(self.tree_locations[visible])
+        if self.remote_signature!=commit:
+            self.directory_dirty.add('remote')
+        if not commit:
             self.remote_tree.clear()
         self.remote_signature=commit
-        status=tuple((f['path'],f['status']) for f in self.state['files'])
-        signature=(self.state.get('branch'),self.state.get('head'),status)
+        inventory=tuple((f['path'],f['status']) for f in self.state['files'])
+        signature=(self.state.get('branch'),self.state.get('head'),inventory)
         if self.directory_scan or signature!=self.local_signature:
-            self.directory_requests['local','']=''
-            for path in self.expanded_directories('local'):
-                self.directory_requests['local',path]=''
+            self.directory_dirty.add('local')
         self.directory_scan=False
         self.local_signature=signature
+        self.queue_visible_directories(visible)
         QTimer.singleShot(0,self.load_next_directory)
 
     def expanded_directories(self,side):
@@ -637,7 +689,7 @@ class Panel(QWidget):
 
     def expand_directory(self,side,item):
         info=item.data(0,Qt.UserRole)
-        if info and info['kind']=='directory':
+        if info and info['kind']=='directory' and info['path'] not in self.loaded_directories[side]:
             self.directory_requests[side,info['path']]=self.remote_signature if side=='remote' else ''
             self.load_next_directory()
 
@@ -648,19 +700,73 @@ class Panel(QWidget):
             return
         if getattr(self.context,'workspace_state',{}).get('animation_working_root')==self.repo:
             return
-        key=next(iter(self.directory_requests));side,path=key
-        commit=self.directory_requests.pop(key)
-        args={'side':side,'path':path}
-        if side=='remote':
-            if not commit:
-                QTimer.singleShot(0,self.load_next_directory)
-                return
+        side=self.active_directory()
+        commit=self.remote_signature if side=='remote' else ''
+        paths=[path for (key,path),pending in self.directory_requests.items()
+               if key==side and pending==commit][:64]
+        if not paths:
+            return
+        for path in paths:
+            self.directory_requests.pop((side,path))
+        args={'side':side,'path':paths[0]}
+        if len(paths)>1:
+            args['paths']=paths
+        if commit:
             args['commit']=commit
         root=self.repo
         def loaded(data):
             if self.repo==root and (side=='local' or self.remote_signature==commit):
-                self.render_directory(side,path,data)
+                for listing in data if isinstance(data,list) else [data]:
+                    self.render_directory(side,listing['path'],listing)
         self.run('tree',args,loaded,False)
+
+    def update_file_marks(self):
+        dirty={f['path']:'冲突' if f['conflict'] else '新增' if f['status']=='??'
+               else '已删除' if 'D' in f['status'] else '已修改' for f in self.state['files']}
+        comparison=self.comparison
+        incoming=set(comparison.get('incoming',()))
+        outgoing=set(comparison.get('outgoing',()))
+        self.file_marks={path:'两边有改动' if path in incoming and path in outgoing
+                         else '旧版本' if path in incoming else '待推送'
+                         for path in comparison.get('different',())}
+        self.file_marks.update(dirty)
+        self.folder_marks=set()
+        for path in self.file_marks:
+            parts=path.split('/')
+            self.folder_marks.update('/'.join(parts[:i]) for i in range(1,len(parts)))
+        for side,tree in self.trees.items():
+            parent=tree.invisibleRootItem()
+            pending=[parent.child(i) for i in range(parent.childCount())]
+            while pending:
+                entry=pending.pop()
+                self.paint_file_mark(entry,side)
+                pending.extend(entry.child(i) for i in range(entry.childCount()))
+
+    def paint_file_mark(self,item,side):
+        info=item.data(0,Qt.UserRole)
+        if not info:
+            return
+        path=info['path']
+        if info['kind']=='directory':
+            label='有变更' if path in self.folder_marks else ''
+        else:
+            label=self.file_marks.get(path)
+            if side=='remote':
+                if label=='旧版本':
+                    label='有更新'
+                elif label in ('已修改','已删除'):
+                    label='本地'+label
+                elif label=='待推送':
+                    label='旧版本'
+            if not label:
+                cloud=bool(self.comparison.get('key',[None,None])[1])
+                label='最新' if self.comparison.get('comparable') else ('未比较' if cloud else '未获取远端')
+        if item.text(1)!=label:
+            item.setText(1,label)
+            colors={'最新':'#4e6943','旧版本':'#8c642c','有更新':'#8c642c','两边有改动':'#933d41',
+                    '冲突':'#a02b39','待推送':'#3f598c','已修改':'#3f598c','新增':'#3f598c','已删除':'#a02b39'}
+            item.setForeground(1,QColor(colors.get(label,'#647167')))
+        item.setToolTip(1,label+' · 基于已获取的远端版本' if label else '')
 
     def directory_item(self,side,path):
         parent=self.trees[side].invisibleRootItem()
@@ -676,10 +782,10 @@ class Panel(QWidget):
         parent=self.directory_item(side,path)
         if parent is None:
             return
-        old={parent.child(i).text(0):parent.child(i) for i in range(parent.childCount())}
+        children=[parent.child(i) for i in range(parent.childCount())]
+        old={item.text(0):item for item in children}
         tree=self.trees[side]
-        icons={kind:tree.style().standardIcon(icon) for kind,icon in
-               (('directory',QStyle.SP_DirIcon),('file',QStyle.SP_FileIcon))}
+        icons=self.directory_icons[side]
         objects=[]
         tree.blockSignals(True)
         try:
@@ -692,14 +798,19 @@ class Panel(QWidget):
                 rel=entry.get('path') or (path+'/'+name if path else name)
                 item.setData(0,Qt.UserRole,{**entry,'path':rel})
                 item.setToolTip(0,rel)
-                item.setIcon(0,icons[kind])
+                if previous is None or previous['kind']!=kind:
+                    item.setIcon(0,icons[kind])
+                self.paint_file_mark(item,side)
                 item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator if kind=='directory' else QTreeWidgetItem.DontShowIndicatorWhenChildless)
                 objects.append((item,item.isExpanded(),item.isSelected()))
-            parent.takeChildren()
-            parent.addChildren([item for item,_,_ in objects])
-            for item,expanded,selected in objects:
-                if expanded:item.setExpanded(True)
-                if selected:item.setSelected(True)
+            items=[item for item,_,_ in objects]
+            if items!=children:
+                parent.takeChildren()
+                parent.addChildren(items)
+                for item,expanded,selected in objects:
+                    if expanded:item.setExpanded(True)
+                    if selected:item.setSelected(True)
+            self.loaded_directories[side].add(path)
         finally:
             tree.blockSignals(False)
 

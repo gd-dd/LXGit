@@ -51,12 +51,24 @@ def main():
         g.run('config', 'user.name', 'UI Test')
         g.run('config', 'user.email', 'ui@example.invalid')
         (repo / '说明.txt').write_text('原来的内容\n', 'utf-8', newline='\n')
+        (repo / '与远端一致.txt').write_text('共同内容\n', 'utf-8', newline='\n')
+        (repo / '等待远端更新.txt').write_text('旧版内容\n', 'utf-8', newline='\n')
         g.run('add', '.')
         g.run('commit', '-m', '初始提交')
         g.run('remote', 'add', 'origin', remote)
         g.run('push', '-u', 'origin', 'main')
         (repo / '说明.txt').write_text('新的内容\n', 'utf-8', newline='\n')
         (repo / '本地草稿.txt').write_text('尚未提交', 'utf-8')
+        peer = base / '队友工作区'
+        g.run('clone', remote, peer)
+        teammate = Git(str(peer), g.exe)
+        teammate.run('config', 'user.name', 'Teammate')
+        teammate.run('config', 'user.email', 'teammate@example.invalid')
+        (peer / '等待远端更新.txt').write_text('远端新版\n', 'utf-8', newline='\n')
+        (peer / '远端新增.txt').write_text('队友新增\n', 'utf-8', newline='\n')
+        teammate.run('add', '.')
+        teammate.run('commit', '-m', '队友更新')
+        teammate.run('push')
 
         parent = QWidget()
         parent.resize(1300, 850)
@@ -103,13 +115,45 @@ def main():
         def find(tree, text):
             return tree.findItems(text, Qt.MatchFlag.MatchExactly | Qt.MatchFlag.MatchRecursive)
 
+        def select_directory(side):
+            panel.directory_mode.setCurrentIndex(panel.directory_mode.findData(side))
+            wait()
+            assert panel.trees[side].isVisible()
+            assert sum(tree.isVisible() for tree in panel.trees.values()) == 1
+
+        def file_mark(tree, path):
+            items = find(tree, path)
+            assert len(items) == 1, path
+            return items[0].text(1)
+
+        wait()
+        assert panel.git_ready and not panel.runtime_box.isVisible()
         panel.add_repo(str(repo))
         wait()
         assert {row['path'] for row in panel.state['files']} == {'说明.txt', '本地草稿.txt'}
-        assert find(panel.remote_tree, '说明.txt')
-        assert find(panel.local_tree, '说明.txt')
-        assert find(panel.local_tree, '本地草稿.txt')
+        assert panel.directory_mode.currentText() == '本地目录'
+        assert panel.local_tree.isVisible() and not panel.remote_tree.isVisible()
+        assert panel.remote_tree.topLevelItemCount() == 0
+        assert file_mark(panel.local_tree, '与远端一致.txt') == '最新'
+        assert file_mark(panel.local_tree, '等待远端更新.txt') == '最新'
+        assert file_mark(panel.local_tree, '说明.txt') == '已修改'
+        assert file_mark(panel.local_tree, '本地草稿.txt') == '新增'
+        assert parent.grab().save(str(OUTPUT / 'workspace-local.png'))
+        panel.run('fetch')
+        wait()
+        assert panel.remote_tree.topLevelItemCount() == 0
+        assert file_mark(panel.local_tree, '等待远端更新.txt') == '旧版本'
+        assert file_mark(panel.local_tree, '与远端一致.txt') == '最新'
+        assert file_mark(panel.local_tree, '说明.txt') == '已修改'
+        select_directory('remote')
+        assert panel.directory_mode.currentText() == '远端目录'
+        assert file_mark(panel.remote_tree, '等待远端更新.txt') == '有更新'
+        assert file_mark(panel.remote_tree, '远端新增.txt') == '有更新'
+        assert file_mark(panel.remote_tree, '与远端一致.txt') == '最新'
+        assert file_mark(panel.remote_tree, '说明.txt') == '本地已修改'
         assert not find(panel.remote_tree, '本地草稿.txt')
+        assert parent.grab().save(str(OUTPUT / 'workspace-remote.png'))
+        select_directory('local')
         selected = change('说明.txt')
         panel.files.setCurrentItem(selected)
         wait()
@@ -155,6 +199,8 @@ def main():
         wait()
         assert [row['path'] for row in panel.state['files']] == ['本地草稿.txt']
         assert g.run('log', '-1', '--format=%s') == '界面提交'
+        assert file_mark(panel.local_tree, '说明.txt') == '待推送'
+        assert file_mark(panel.local_tree, '等待远端更新.txt') == '旧版本'
 
         panel.amend.setChecked(True)
         panel.message.setText('界面提交')
@@ -227,9 +273,10 @@ def main():
         panel.warn = errors.append
         wait()
         assert repo.resolve() == Path(panel.repo).resolve()
+        assert panel.git_ready and not panel.runtime_box.isVisible()
         second.shutdown()
         parent.close()
-    print('PASS: native host, packaged worker, remote and local trees, contextual diff, inclusion, removal, commit, history, partial staging, clean branch switching and reopen')
+    print('PASS: native host, packaged worker, lazy directory selector, local and remote file statuses, contextual diff, inclusion, removal, commit, history, partial staging, clean branch switching and reopen')
 
 
 if __name__ == '__main__':
